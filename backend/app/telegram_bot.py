@@ -4,9 +4,13 @@ Telegram bot for LingoWeave: document upload -> payment (or admin skip) -> trans
 import asyncio
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Throttle progress edits to avoid Telegram rate limits (max once per N seconds)
+PROGRESS_EDIT_THROTTLE_SECONDS = 4
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
@@ -173,29 +177,39 @@ async def _do_translation_flow(
     _active_translations += 1
     status_msg = None
     try:
-        # Send initial progress message and edit it every ~10%
         status_msg = await bot.send_message(chat_id, "Обработка... " + _progress_bar(0) + " 0%")
-        last_percent = [0]  # use list to allow closure to mutate
+        last_percent = [0]
+        last_edit_time = [0.0]
 
-        async def send_progress(cid: int, text: str):
-            # Progress bar: only update every 10% (or on first/last)
-            pass  # we use progress_callback below instead
-
-        async def progress_callback(current: int, total: int):
-            if total <= 0:
+        async def progress_callback(finished_chapters: int, total_chapters: int):
+            if total_chapters <= 0:
                 return
-            percent = min(100, round(100 * current / total))
-            if percent >= last_percent[0] + 10 or current == total:
-                last_percent[0] = percent
-                bar = _progress_bar(percent)
-                try:
-                    await bot.edit_message_text(
-                        f"Обработка... {bar} {percent}%",
-                        chat_id=cid,
-                        message_id=status_msg.message_id,
-                    )
-                except Exception:
-                    pass  # ignore edit conflicts / rate limit
+            progress = int((finished_chapters / total_chapters) * 100)
+            progress = min(100, progress)
+            now = time.monotonic()
+            throttle_ok = (
+                last_edit_time[0] == 0
+                or (now - last_edit_time[0]) >= PROGRESS_EDIT_THROTTLE_SECONDS
+            )
+            is_final = progress >= 100
+            if not (throttle_ok or is_final):
+                return
+            if progress <= last_percent[0] and not is_final:
+                return
+            last_percent[0] = progress
+            last_edit_time[0] = now
+            bar = _progress_bar(progress)
+            text = f"Обработка... {bar} {progress}%"
+            try:
+                await bot.edit_message_text(
+                    text,
+                    chat_id=chat_id,
+                    message_id=status_msg.message_id,
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                if "message is not modified" not in msg and "same content" not in msg:
+                    logger.debug("Progress edit failed: %s", e)
 
         output_path = await _run_translation(
             input_path, ext, progress_callback, chat_id, bot, model_id=model_id
@@ -203,7 +217,16 @@ async def _do_translation_flow(
         if not output_path or not os.path.exists(output_path):
             raise RuntimeError("Translation produced no output")
 
-        # Remove progress message (optional; or leave and edit to "Готово")
+        # Final status before sending file
+        try:
+            await bot.edit_message_text(
+                "✅ Обработка завершена! Подготавливаю файл к отправке...",
+                chat_id=chat_id,
+                message_id=status_msg.message_id,
+            )
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.debug("Final progress edit failed: %s", e)
         try:
             await status_msg.delete()
         except Exception:
