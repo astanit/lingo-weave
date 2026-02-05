@@ -47,9 +47,12 @@ class WeaveOptions:
 
 
 def chapter_target_ratio(chapter_index: int, total_chapters: int) -> float:
+    """Target English percentage: Ch1 ~5%, middle ~50%, last 100%. Returns ratio in [0.05, 1.0]."""
     if total_chapters <= 1:
         return 1.0
-    return chapter_index / (total_chapters - 1)
+    # target_percent = 5 + (current_chapter_index / total_chapters) * 95 -> Ch1 5%, last 100%
+    target_percent = 5 + (chapter_index / (total_chapters - 1)) * 95
+    return max(0.05, min(1.0, target_percent / 100.0))
 
 
 def count_chapter_words(html: str) -> int:
@@ -66,17 +69,18 @@ async def _weave_chapter_async(
     ratio: float,
     translator: OpenRouterTranslator,
     options: WeaveOptions,
+    target_percent: float,
 ) -> str:
     """
-    Diglot Weave: word count happens before AI call; then non-blocking API.
-    Returns weaved HTML. Raises on failure so caller can fallback.
+    Diglot Weave: word count before AI call; then non-blocking API.
+    target_percent is used in the prompt (e.g. 5, 50, 100).
     """
     total_words = count_chapter_words(html)
     target_words_count = max(0, int(round(total_words * ratio)))
     if target_words_count == 0:
         return html
     return await translator.diglot_weave_chapter(
-        html, total_words, target_words_count, ratio=ratio
+        html, total_words, target_words_count, ratio=ratio, target_percent=target_percent
     )
 
 
@@ -126,10 +130,16 @@ async def _process_single_chapter_async(
 
     try:
         ratio = chapter_target_ratio(idx, total)
-        weaved = await _weave_chapter_async(original, ratio, translator, options)
+        target_percent = round(ratio * 100)
+        print(f"Chapter {chapter_num}: Target percent set to {target_percent}%", flush=True)
+        weaved = await _weave_chapter_async(
+            original, ratio, translator, options, target_percent=target_percent
+        )
         if weaved is None or not isinstance(weaved, str):
             weaved = original
         result = str(weaved)
+        if "<b>" not in result and "<b " not in result:
+            logger.warning("Chapter %s: No bold tags found in AI response", chapter_num)
     except Exception as e:
         logger.warning("Chapter %s failed (%s), using original text", chapter_num, e)
         result = original
@@ -172,7 +182,7 @@ async def _weave_epub_async(
             )
 
     tasks = [process_chapter_async(idx, item) for idx, item in enumerate(items)]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    results = await asyncio.gather(*tasks, return_exceptions=True)  # await all chapter tasks
 
     # Match by ID: store translated content (string) by item_id
     translated_items: Dict[str, str] = {}

@@ -6,18 +6,19 @@ from typing import Dict, Iterable, List
 from openai import AsyncOpenAI, OpenAI
 
 DIGLOT_SYSTEM_PROMPT = """You are a Diglot Weave generator.
-In this text ({total_words} words), replace exactly {target_words_count} UNIQUE common nouns, verbs, or adjectives with English equivalents.
-CRITICAL: Do not translate names, locations, or titles. Wrap English words in <b>tags</b>. Scatter them randomly.
+For this segment, your target is {target_percent}% English words.
 
-Strict linguistic rules:
-1. **PROPER NOUNS FILTER:** NEVER translate names of people (e.g., Julian, John), names of cities/countries (e.g., London, Moscow), or brand names. Keep them in Russian/original.
-2. **PARTS OF SPEECH:** Target only common nouns, verbs, and adjectives.
-3. **NO REPETITIONS:** Each English word must be unique within the chapter. If "порох" is translated as "powder", do not translate "порох" again in the same chapter. Do not reuse the same English word for different Russian words.
-4. **DISTRIBUTION:** Scatter words randomly throughout the text—not just at the start of paragraphs (beginning, middle, and end).
-5. **Formatting:** Every English word MUST be wrapped in <b> tags. Example: <b>word</b>.
-6. **HTML Preservation:** Keep all original HTML tags (like <p>, <div>, <br>) exactly where they are.
+Rules:
+1. Replace approximately {target_words_count} words.
+2. DISTRIBUTION: Scatter words RANDOMLY. Do not translate only the beginning of sentences.
+3. FILTERS: Never translate names (Урсула, Амалия, etc.) or places.
+4. TYPES: Focus on common nouns, verbs, and adjectives.
+5. FORMAT: Wrap every English word in <b>tags</b>. Example: <b>carriage</b>.
+6. NO REPETITION: Use unique words for translation within this segment.
 
-Respond with ONLY the processed HTML document. No explanations, no markdown, no code block—just the raw HTML."""
+Text length: {total_words} words. You MUST add English replacements (wrapped in <b>) so that roughly {target_percent}% of the content is in English. Preserve all HTML tags (e.g. <p>, <div>, <br>).
+
+Respond with ONLY the processed HTML document. No explanations, no markdown—just the raw HTML."""
 
 
 class OpenRouterTranslator:
@@ -116,12 +117,15 @@ class OpenRouterTranslator:
         return mapping
 
     async def diglot_weave_chapter(
-        self, html: str, total_words: int, target_words_count: int, ratio: float = 1.0
+        self,
+        html: str,
+        total_words: int,
+        target_words_count: int,
+        ratio: float = 1.0,
+        target_percent: float = 100.0,
     ) -> str:
         """
-        Process a full chapter HTML with Diglot Weave (non-blocking): replace exactly
-        target_words_count UNIQUE Russian words with English (wrapped in <b>), scattered.
-        Returns processed HTML only.
+        Process a full chapter HTML with Diglot Weave (non-blocking). Returns processed HTML only.
         """
         if target_words_count <= 0:
             return html
@@ -129,6 +133,7 @@ class OpenRouterTranslator:
         system = DIGLOT_SYSTEM_PROMPT.format(
             total_words=total_words,
             target_words_count=target_words_count,
+            target_percent=int(round(target_percent)),
         )
         if ratio < 0.30:
             system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."
