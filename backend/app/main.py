@@ -20,19 +20,16 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="LingoWeave API")
 
-# CORS: allow frontend domain. Set CORS_ORIGINS to your frontend URL (e.g. https://your-app.up.railway.app)
-# or leave unset for development (localhost:3000). Use "*" to allow any origin (no credentials).
-_cors_origins_raw = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
-if _cors_origins_raw == "*":
+# CORS: configured only via CORS_ORIGINS env var.
+# Comma-separated list of allowed origins (e.g. https://your-frontend.up.railway.app).
+# Use "*" to allow any origin (credentials disabled). Default: http://localhost:3000
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
+if CORS_ORIGINS == "*":
     _cors_origins = ["*"]
     _cors_credentials = False
 else:
-    _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
-    if not _cors_origins:
-        _cors_origins = ["*"]
-        _cors_credentials = False
-    else:
-        _cors_credentials = True
+    _cors_origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()] or ["http://localhost:3000"]
+    _cors_credentials = True
 
 app.add_middleware(
     CORSMiddleware,
