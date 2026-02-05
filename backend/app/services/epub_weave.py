@@ -5,7 +5,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import ebooklib
 from bs4 import BeautifulSoup
@@ -233,6 +233,7 @@ async def _weave_epub_async(
     input_epub_path: str,
     outputs_dir: str,
     options: WeaveOptions,
+    progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
 ) -> Tuple[str, str]:
     options = options or WeaveOptions()
     out_root = Path(outputs_dir)
@@ -274,6 +275,8 @@ async def _weave_epub_async(
                 translated_items[rid] = html
                 extract_glossary_to_vocab(html, global_vocab, already_glossaried=already_glossaried)
                 print(f"Chapter {idx + 1}: Success", flush=True)
+                if progress_callback:
+                    await progress_callback(idx + 1, total)
             else:
                 original_html = _get_item_html(item)
                 translated_items[item_id] = original_html if original_html is not None else ""
@@ -327,8 +330,6 @@ def weave_epub(
 ) -> Tuple[str, str]:
     """
     Reads an EPUB and writes a new EPUB with progressively increasing English words.
-    Uses parallel chapter processing (up to 5 at a time) and falls back to original
-    text on any failure.
     Returns (job_id, output_epub_path).
     """
     options = options or WeaveOptions()
@@ -338,4 +339,20 @@ def weave_epub(
             outputs_dir=outputs_dir,
             options=options,
         )
+    )
+
+
+async def run_weave_epub_async(
+    input_epub_path: str,
+    outputs_dir: str,
+    options: WeaveOptions | None = None,
+    progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+) -> Tuple[str, str]:
+    """Async entry point for EPUB weave with optional progress (e.g. for Telegram bot)."""
+    options = options or WeaveOptions()
+    return await _weave_epub_async(
+        input_epub_path=input_epub_path,
+        outputs_dir=outputs_dir,
+        options=options,
+        progress_callback=progress_callback,
     )

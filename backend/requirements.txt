@@ -6,3 +6,4 @@ beautifulsoup4
 openai
 pydantic
 lxml
+aiogram>=3.0,<4

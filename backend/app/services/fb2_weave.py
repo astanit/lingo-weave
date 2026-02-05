@@ -4,7 +4,7 @@ FB2 Diglot Weave: extract <p> from body, process in segments, re-assemble valid 
 import logging
 import uuid
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from lxml import etree
 
@@ -112,7 +112,7 @@ def weave_fb2(
     already_glossaried: Set[str] = set()
     total = len(segments)
 
-    async def run_all():
+    async def run_all(progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None):
         results = []
         for idx, seg in enumerate(segments):
             seg_html = _wrap_segment_html(seg)
@@ -120,6 +120,8 @@ def weave_fb2(
                 seg_html, idx, total, translator, options, global_vocab, already_glossaried
             )
             results.append(weaved)
+            if progress_callback:
+                await progress_callback(idx + 1, total)
         return results
 
     weaved_list = asyncio.run(run_all())
@@ -141,4 +143,57 @@ def weave_fb2(
         xml_declaration=True,
         method="xml",
     )
+    return job_id, output_path
+
+
+async def run_weave_fb2_async(
+    input_fb2_path: str,
+    outputs_dir: str,
+    options: Optional[WeaveOptions] = None,
+    progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+) -> Tuple[str, str]:
+    """Async entry point for FB2 weave with optional progress (e.g. for Telegram bot)."""
+    options = options or WeaveOptions()
+    out_root = Path(outputs_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    job_id = uuid.uuid4().hex
+    out_dir = out_root / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    parser = etree.XMLParser(recover=True, remove_blank_text=False)
+    tree = etree.parse(input_fb2_path, parser)
+    root = tree.getroot()
+
+    items = _collect_p_elements(root)
+    if not items:
+        output_path = str(out_dir / "lingoweave.fb2")
+        tree.write(output_path, encoding="utf-8", xml_declaration=True, method="xml")
+        return job_id, output_path
+
+    segments = _segment_by_char_count(items)
+    translator = OpenRouterTranslator()
+    global_vocab: Dict[str, str] = {}
+    already_glossaried: Set[str] = set()
+    total = len(segments)
+
+    weaved_list = []
+    for idx, seg in enumerate(segments):
+        seg_html = _wrap_segment_html(seg)
+        weaved = await process_one_segment_async(
+            seg_html, idx, total, translator, options, global_vocab, already_glossaried
+        )
+        weaved_list.append(weaved)
+        if progress_callback:
+            await progress_callback(idx + 1, total)
+
+    for seg_idx, (segment_items, weaved_html) in enumerate(zip(segments, weaved_list)):
+        paras = _weaved_html_to_paragraphs(weaved_html)
+        for i, (elem, _) in enumerate(segment_items):
+            new_text = paras[i] if i < len(paras) else ""
+            elem.text = new_text
+            for child in list(elem):
+                elem.remove(child)
+
+    output_path = str(out_dir / "lingoweave.fb2")
+    tree.write(output_path, encoding="utf-8", xml_declaration=True, method="xml")
     return job_id, output_path

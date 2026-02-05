@@ -5,7 +5,7 @@ import html
 import logging
 import uuid
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from app.services.epub_weave import (
     WeaveOptions,
@@ -77,7 +77,7 @@ def weave_txt(
     already_glossaried: Set[str] = set()
     total = len(segments_plain)
 
-    async def run_all():
+    async def run_all(progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None):
         results = []
         for idx, plain in enumerate(segments_plain):
             seg_html = _wrap_segment_html(plain)
@@ -85,9 +85,57 @@ def weave_txt(
                 seg_html, idx, total, translator, options, global_vocab, already_glossaried
             )
             results.append(html_to_plain(weaved))
+            if progress_callback:
+                await progress_callback(idx + 1, total)
         return results
 
     results_plain = asyncio.run(run_all())
+    output_path = str(out_dir / "lingoweave.txt")
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(results_plain))
+
+    return job_id, output_path
+
+
+async def run_weave_txt_async(
+    input_txt_path: str,
+    outputs_dir: str,
+    options: Optional[WeaveOptions] = None,
+    progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+) -> Tuple[str, str]:
+    """Async entry point for TXT weave with optional progress (e.g. for Telegram bot)."""
+    options = options or WeaveOptions()
+    out_root = Path(outputs_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    job_id = uuid.uuid4().hex
+    out_dir = out_root / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(input_txt_path, "r", encoding="utf-8", errors="replace") as f:
+        full_text = f.read()
+
+    segments_plain = _split_into_segments(full_text)
+    if not segments_plain:
+        output_path = str(out_dir / "lingoweave.txt")
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("")
+        return job_id, output_path
+
+    translator = OpenRouterTranslator()
+    global_vocab: Dict[str, str] = {}
+    already_glossaried: Set[str] = set()
+    total = len(segments_plain)
+
+    results_plain = []
+    for idx, plain in enumerate(segments_plain):
+        seg_html = _wrap_segment_html(plain)
+        weaved = await process_one_segment_async(
+            seg_html, idx, total, translator, options, global_vocab, already_glossaried
+        )
+        results_plain.append(html_to_plain(weaved))
+        if progress_callback:
+            await progress_callback(idx + 1, total)
+
     output_path = str(out_dir / "lingoweave.txt")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n\n".join(results_plain))

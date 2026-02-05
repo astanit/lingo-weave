@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import shutil
@@ -5,6 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, Optional
 
+from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -24,7 +26,23 @@ OUTPUTS_DIR = BASE_DIR / "outputs"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="LingoWeave API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if os.getenv("TELEGRAM_BOT_TOKEN"):
+        from telegram_bot import run_telegram_bot
+        task = asyncio.create_task(run_telegram_bot())
+        yield
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    else:
+        yield
+
+
+app = FastAPI(title="LingoWeave API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
