@@ -20,8 +20,8 @@ from aiogram.types import (
     SuccessfulPayment,
 )
 
-# Paths aligned with backend/app/main.py
-BASE_DIR = Path(__file__).resolve().parent
+# Paths aligned with backend/app/main.py (BASE_DIR = backend/)
+BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = BASE_DIR / "uploads"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 ALLOWED_EXTENSIONS = (".epub", ".txt", ".fb2")

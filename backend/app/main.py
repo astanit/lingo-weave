@@ -30,7 +30,7 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if os.getenv("TELEGRAM_BOT_TOKEN"):
-        from telegram_bot import run_telegram_bot
+        from .telegram_bot import run_telegram_bot
         task = asyncio.create_task(run_telegram_bot())
         yield
         task.cancel()
