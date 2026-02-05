@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import uuid
@@ -5,6 +6,8 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 

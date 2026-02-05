@@ -1,9 +1,13 @@
+import asyncio
+import logging
 import os
 import re
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import ebooklib
 from bs4 import BeautifulSoup
@@ -11,6 +15,7 @@ from ebooklib import epub
 
 from app.services.openrouter_translate import OpenRouterTranslator
 
+logger = logging.getLogger(__name__)
 
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 TOKEN_RE = re.compile(r"(\w+|\s+|[^\w\s]+)", flags=re.UNICODE)
@@ -55,7 +60,11 @@ def weave_chapter_html(
     translator: OpenRouterTranslator,
     cache: Dict[str, str],
     options: WeaveOptions,
+    cache_lock: Optional[threading.Lock] = None,
 ) -> str:
+    """
+    Returns weaved HTML. Raises on failure so caller can fallback to original.
+    """
     soup = BeautifulSoup(html, "html.parser")
 
     # Collect text nodes under body
@@ -81,20 +90,37 @@ def weave_chapter_html(
         translate_positions = set(cyrillic_positions[:k])
         for i in translate_positions:
             w = tokens[i]
-            if w not in cache:
-                needed_words.append(w)
+            if cache_lock:
+                with cache_lock:
+                    if w not in cache:
+                        needed_words.append(w)
+            else:
+                if w not in cache:
+                    needed_words.append(w)
         per_node_tokens.append((node, tokens, list(translate_positions)))
 
-    # Translate missing words (batched)
+    # Translate missing words (batched); AI failure will raise
     if needed_words:
         mapping = translator.translate_words_in_batches(needed_words)
-        cache.update(mapping)
+        if mapping is None:
+            mapping = {}
+        if cache_lock:
+            with cache_lock:
+                cache.update(mapping)
+        else:
+            cache.update(mapping)
 
     # Second pass: apply translations with bolding
     for node, tokens, translate_positions in per_node_tokens:
         for i in translate_positions:
             ru = tokens[i]
-            en = cache.get(ru, ru)
+            if cache_lock:
+                with cache_lock:
+                    en = cache.get(ru, ru)
+            else:
+                en = cache.get(ru, ru)
+            if en is None:
+                en = ru
             if options.bold_translations and en != ru:
                 tokens[i] = f"<b>{en}</b>"
             else:
@@ -107,15 +133,48 @@ def weave_chapter_html(
     return str(soup)
 
 
-def weave_epub(
+def _get_item_html(item) -> str:
+    raw = item.get_content()
+    try:
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="ignore")
+        return str(raw) if raw else ""
+    except Exception:
+        return str(raw) if raw else ""
+
+
+def _process_single_chapter(
+    idx: int,
+    item,
+    total: int,
+    translator: OpenRouterTranslator,
+    cache: Dict[str, str],
+    cache_lock: threading.Lock,
+    options: WeaveOptions,
+) -> Tuple[int, str]:
+    """Process one chapter. Returns (idx, html). On any failure, returns (idx, original_html)."""
+    chapter_num = idx + 1
+    logger.info("Started chapter %s", chapter_num)
+    original = _get_item_html(item)
+    ratio = chapter_target_ratio(idx, total)
+    try:
+        weaved = weave_chapter_html(
+            original, ratio, translator, cache, options, cache_lock=cache_lock
+        )
+        if weaved is None or not isinstance(weaved, str):
+            weaved = original
+    except Exception as e:
+        logger.warning("Chapter %s failed (%s), using original text", chapter_num, e)
+        weaved = original
+    logger.info("Finished chapter %s", chapter_num)
+    return (idx, weaved)
+
+
+async def _weave_epub_async(
     input_epub_path: str,
     outputs_dir: str,
-    options: WeaveOptions | None = None,
+    options: WeaveOptions,
 ) -> Tuple[str, str]:
-    """
-    Reads an EPUB and writes a new EPUB with progressively increasing English words.
-    Returns (job_id, output_epub_path).
-    """
     options = options or WeaveOptions()
     out_root = Path(outputs_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -125,24 +184,71 @@ def weave_epub(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     book = epub.read_epub(input_epub_path)
-    items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+    all_items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+    # Only process ITEM_DOCUMENT (skip images, styles, etc.)
+    items = [
+        i
+        for i in all_items
+        if getattr(i, "get_type", lambda: ebooklib.ITEM_DOCUMENT)() == ebooklib.ITEM_DOCUMENT
+    ]
 
     translator = OpenRouterTranslator()
     cache: Dict[str, str] = {}
-
+    cache_lock = threading.Lock()
     total = len(items)
-    for idx, item in enumerate(items):
-        ratio = chapter_target_ratio(idx, total)
-        raw = item.get_content()
-        try:
-            html = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
-        except Exception:
-            html = str(raw)
 
-        weaved = weave_chapter_html(html, ratio, translator, cache, options)
-        item.set_content(weaved.encode("utf-8"))
+    sem = asyncio.Semaphore(5)
+    executor = ThreadPoolExecutor(max_workers=5)
+    loop = asyncio.get_event_loop()
+
+    async def process_chapter_async(idx: int, item) -> Tuple[int, str]:
+        async with sem:
+            return await loop.run_in_executor(
+                executor,
+                _process_single_chapter,
+                idx,
+                item,
+                total,
+                translator,
+                cache,
+                cache_lock,
+                options,
+            )
+
+    tasks = [process_chapter_async(idx, item) for idx, item in enumerate(items)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            logger.warning("Chapter %s raised %s, keeping original", i + 1, r)
+            original = _get_item_html(items[i])
+            items[i].set_content(original.encode("utf-8"))
+        else:
+            idx, weaved = r
+            content = weaved.encode("utf-8") if isinstance(weaved, str) else weaved
+            items[idx].set_content(content)
 
     output_path = str(out_dir / "lingoweave.epub")
     epub.write_epub(output_path, book)
     return job_id, output_path
 
+
+def weave_epub(
+    input_epub_path: str,
+    outputs_dir: str,
+    options: WeaveOptions | None = None,
+) -> Tuple[str, str]:
+    """
+    Reads an EPUB and writes a new EPUB with progressively increasing English words.
+    Uses parallel chapter processing (up to 5 at a time) and falls back to original
+    text on any failure.
+    Returns (job_id, output_epub_path).
+    """
+    options = options or WeaveOptions()
+    return asyncio.run(
+        _weave_epub_async(
+            input_epub_path=input_epub_path,
+            outputs_dir=outputs_dir,
+            options=options,
+        )
+    )
