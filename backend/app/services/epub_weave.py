@@ -54,6 +54,15 @@ def chapter_target_ratio(chapter_index: int, total_chapters: int) -> float:
     return chapter_index / (total_chapters - 1)
 
 
+def count_chapter_words(html: str) -> int:
+    """Count word tokens (containing at least one letter) in the chapter body."""
+    soup = BeautifulSoup(html, "html.parser")
+    body = soup.body or soup
+    text = body.get_text(separator=" ", strip=True)
+    tokens = tokenize_text(text)
+    return sum(1 for t in tokens if any(c.isalpha() for c in t))
+
+
 def weave_chapter_html(
     html: str,
     ratio: float,
@@ -63,78 +72,17 @@ def weave_chapter_html(
     cache_lock: Optional[threading.Lock] = None,
 ) -> str:
     """
-    Returns weaved HTML. Raises on failure so caller can fallback to original.
+    Diglot Weave: compute total word count and exact replacement count, send full chapter
+    to AI with optimized prompt. Returns weaved HTML. Raises on failure so caller can fallback.
     """
-    soup = BeautifulSoup(html, "html.parser")
+    total_words = count_chapter_words(html)
+    target_words_count = max(0, int(round(total_words * ratio)))
+    if target_words_count == 0:
+        return html
 
-    # Collect text nodes under body
-    text_nodes = []
-    body = soup.body or soup
-    for node in body.find_all(string=True):
-        # Skip script/style
-        if node.parent and node.parent.name in ("script", "style"):
-            continue
-        if not node.strip():
-            continue
-        text_nodes.append(node)
-
-    # First pass: identify which unique RU words are needed for this ratio
-    per_node_tokens: List[Tuple[object, List[str], List[int]]] = []
-    needed_words: List[str] = []
-
-    for node in text_nodes:
-        tokens = tokenize_text(str(node))
-        cyrillic_positions = [i for i, t in enumerate(tokens) if is_cyrillic_word(t)]
-        total_cyr = len(cyrillic_positions)
-        k = int(total_cyr * ratio + 1e-9)
-        translate_positions = set(cyrillic_positions[:k])
-        for i in translate_positions:
-            w = tokens[i]
-            if cache_lock:
-                with cache_lock:
-                    if w not in cache:
-                        needed_words.append(w)
-            else:
-                if w not in cache:
-                    needed_words.append(w)
-        per_node_tokens.append((node, tokens, list(translate_positions)))
-
-    # Translate missing words (batched). On ANY AI error (timeout, API, empty), skip translation for this batch.
-    if needed_words:
-        try:
-            mapping = translator.translate_words_in_batches(needed_words)
-            if mapping is None:
-                mapping = {}
-            if cache_lock:
-                with cache_lock:
-                    cache.update(mapping)
-            else:
-                cache.update(mapping)
-        except Exception:
-            # Fallback: leave mapping empty so cache.get(ru, ru) keeps original; caller can still get valid HTML
-            pass
-
-    # Second pass: apply translations with bolding
-    for node, tokens, translate_positions in per_node_tokens:
-        for i in translate_positions:
-            ru = tokens[i]
-            if cache_lock:
-                with cache_lock:
-                    en = cache.get(ru, ru)
-            else:
-                en = cache.get(ru, ru)
-            if en is None:
-                en = ru
-            if options.bold_translations and en != ru:
-                tokens[i] = f"<b>{en}</b>"
-            else:
-                tokens[i] = en
-
-        # Replace this text node with HTML (may contain <b>)
-        new_html = detokenize(tokens)
-        node.replace_with(BeautifulSoup(new_html, "html.parser"))
-
-    return str(soup)
+    return translator.diglot_weave_chapter(
+        html, total_words, target_words_count, ratio=ratio
+    )
 
 
 def _get_item_html(item) -> str:

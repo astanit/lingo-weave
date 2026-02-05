@@ -1,8 +1,22 @@
 import json
 import os
+import re
 from typing import Dict, Iterable, List
 
 from openai import OpenAI
+
+DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' linguistic expert. Your goal is to help a Russian reader learn English via gradual immersion.
+
+Rules for this task:
+1. **Scattered Distribution:** DO NOT translate chunks or full phrases at the beginning of sentences. You must scatter English words randomly like 'salt and pepper' throughout the entire text (beginning, middle, and end of paragraphs).
+2. **Individual Word Focus:** Replace individual Russian words with their English equivalents. Avoid replacing more than 2-3 words in a row unless necessary for a specific idiom.
+3. **Target Count:** In this text of approximately {total_words} words, you MUST replace EXACTLY {target_words_count} words with English.
+4. **Variety:** Target various parts of speech—nouns, verbs, and adjectives—randomly across the text.
+5. **Formatting:** Every single English word or short phrase MUST be wrapped in <b> tags. Example: <b>word</b>.
+6. **Grammar Integrity:** The English words should be in their dictionary form (e.g., "He opened the <b>door</b>") or lightly adapted so the Russian reader can still follow the sentence structure easily.
+7. **HTML Preservation:** Keep all original HTML tags (like <p>, <div>, <br>) exactly where they are.
+
+Respond with ONLY the processed HTML document. No explanations, no markdown, no code block—just the raw HTML."""
 
 
 class OpenRouterTranslator:
@@ -95,4 +109,47 @@ class OpenRouterTranslator:
         if buf:
             mapping.update(self.translate_words_ru_to_en(buf))
         return mapping
+
+    def diglot_weave_chapter(
+        self, html: str, total_words: int, target_words_count: int, ratio: float = 1.0
+    ) -> str:
+        """
+        Process a full chapter HTML with Diglot Weave: replace exactly target_words_count
+        Russian words with English (wrapped in <b>), scattered randomly. Returns processed HTML only.
+        """
+        if target_words_count <= 0:
+            return html
+
+        system = DIGLOT_SYSTEM_PROMPT.format(
+            total_words=total_words,
+            target_words_count=target_words_count,
+        )
+        if ratio < 0.30:
+            system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."
+
+        user = (
+            "Process the following HTML. Replace exactly "
+            f"{target_words_count} Russian words with English equivalents, scattered randomly. "
+            "Wrap every English word in <b> tags. Preserve all HTML structure. "
+            "Reply with ONLY the processed HTML, nothing else.\n\n"
+            + html
+        )
+
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.3,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            return html
+
+        # Strip markdown code block if present
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:html)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        return content.strip()
 
