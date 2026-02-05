@@ -5,6 +5,20 @@ from typing import Dict, Iterable, List, Optional
 
 from openai import AsyncOpenAI, OpenAI
 
+FALLBACK_MODEL = "openai/gpt-4o-mini"
+
+
+def _is_model_not_found_error(exc: Exception) -> bool:
+    """True if API returned 404 or 'Model not found'."""
+    msg = str(exc).lower()
+    if "model" in msg and "not found" in msg:
+        return True
+    if hasattr(exc, "status_code") and getattr(exc, "status_code") == 404:
+        return True
+    if hasattr(exc, "response") and getattr(exc.response, "status_code", None) == 404:
+        return True
+    return False
+
 DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher.
 
 1. Translate the text according to the target percentage ({target_percent}%).
@@ -44,7 +58,7 @@ class OpenRouterTranslator:
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
         )
-        self.model = model or os.getenv("OPENROUTER_MODEL", "google/gemini-flash-1.5")
+        self.model = model or os.getenv("OPENROUTER_MODEL", FALLBACK_MODEL)
 
     def translate_words_ru_to_en(self, words: List[str]) -> Dict[str, str]:
         """
@@ -74,14 +88,30 @@ class OpenRouterTranslator:
             "Return JSON object like: {\"привет\": \"hello\"}"
         )
 
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.2,
-        )
+        model_id = self.model
+        print(f"DEBUG: Using model slug '{model_id}'")
+        try:
+            resp = self.client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+            )
+        except Exception as e:
+            if _is_model_not_found_error(e):
+                print(f"DEBUG: Retrying with fallback '{FALLBACK_MODEL}'")
+                resp = self.client.chat.completions.create(
+                    model=FALLBACK_MODEL,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=0.2,
+                )
+            else:
+                raise
 
         content = resp.choices[0].message.content or ""
         try:
@@ -176,14 +206,30 @@ class OpenRouterTranslator:
             + html
         )
 
-        resp = await self.async_client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.3,
-        )
+        model_id = self.model
+        print(f"DEBUG: Using model slug '{model_id}'")
+        try:
+            resp = await self.async_client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.3,
+            )
+        except Exception as e:
+            if _is_model_not_found_error(e):
+                print(f"DEBUG: Retrying with fallback '{FALLBACK_MODEL}'")
+                resp = await self.async_client.chat.completions.create(
+                    model=FALLBACK_MODEL,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=0.3,
+                )
+            else:
+                raise
         content = (resp.choices[0].message.content or "").strip()
         if not content:
             return html

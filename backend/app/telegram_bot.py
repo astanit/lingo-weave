@@ -34,9 +34,10 @@ logger = logging.getLogger(__name__)
 ADMIN_USERNAME = "qaskar"
 STARS_CURRENCY = "XTR"
 
-# Tier: (model_id, amount in Stars)
-MODEL_FAST = "google/gemini-flash-1.5"
-MODEL_PREMIUM = "openai/gpt-4o"
+# Tier: (model_id, amount in Stars) — slugs per OpenRouter docs
+MODEL_FAST = "google/gemini-2.0-flash-001"
+MODEL_PREMIUM = "anthropic/claude-3.5-sonnet"
+FALLBACK_MODEL = "openai/gpt-4o-mini"
 PRICE_FAST = 100
 PRICE_PREMIUM = 200
 TIERS = {"fast": (MODEL_FAST, PRICE_FAST), "premium": (MODEL_PREMIUM, PRICE_PREMIUM)}
@@ -265,7 +266,7 @@ def _model_choice_keyboard(choice_id: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
-                text="💎 Премиум (GPT-4o) — 200 звёзд",
+                text="💎 Премиум (Claude) — 200 звёзд",
                 callback_data=f"tier:{choice_id}:premium",
             ),
         ],
