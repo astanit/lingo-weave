@@ -3,18 +3,22 @@ import os
 import re
 from typing import Dict, Iterable, List
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' linguistic expert. Your goal is to help a Russian reader learn English via gradual immersion.
 
 Rules for this task:
 1. **Scattered Distribution:** DO NOT translate chunks or full phrases at the beginning of sentences. You must scatter English words randomly like 'salt and pepper' throughout the entire text (beginning, middle, and end of paragraphs).
 2. **Individual Word Focus:** Replace individual Russian words with their English equivalents. Avoid replacing more than 2-3 words in a row unless necessary for a specific idiom.
-3. **Target Count:** In this text of approximately {total_words} words, you MUST replace EXACTLY {target_words_count} words with English.
-4. **Variety:** Target various parts of speech—nouns, verbs, and adjectives—randomly across the text.
+3. **NO REPETITIONS:** Do not translate the same Russian word into English multiple times within this chapter. If you translated 'порох' to '<b>powder</b>' once, all other instances of 'порох' in this chapter must remain in Russian.
+4. **Diversity:** To reach your target of {target_words_count} words, you MUST pick DIFFERENT, unique words throughout the text. **Spread:** Prioritize translating new nouns, verbs, and adjectives that haven't been translated yet in this segment.
 5. **Formatting:** Every single English word or short phrase MUST be wrapped in <b> tags. Example: <b>word</b>.
 6. **Grammar Integrity:** The English words should be in their dictionary form (e.g., "He opened the <b>door</b>") or lightly adapted so the Russian reader can still follow the sentence structure easily.
 7. **HTML Preservation:** Keep all original HTML tags (like <p>, <div>, <br>) exactly where they are.
+
+Total words in text: {total_words}.
+Your goal: Replace EXACTLY {target_words_count} UNIQUE Russian words with their English equivalents.
+Do not repeat English words. If you use '<b>weapon</b>' once, do not use it again in this response. Find another word to translate instead.
 
 Respond with ONLY the processed HTML document. No explanations, no markdown, no code block—just the raw HTML."""
 
@@ -28,6 +32,10 @@ class OpenRouterTranslator:
             )
 
         self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+        )
+        self.async_client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
         )
@@ -110,12 +118,13 @@ class OpenRouterTranslator:
             mapping.update(self.translate_words_ru_to_en(buf))
         return mapping
 
-    def diglot_weave_chapter(
+    async def diglot_weave_chapter(
         self, html: str, total_words: int, target_words_count: int, ratio: float = 1.0
     ) -> str:
         """
-        Process a full chapter HTML with Diglot Weave: replace exactly target_words_count
-        Russian words with English (wrapped in <b>), scattered randomly. Returns processed HTML only.
+        Process a full chapter HTML with Diglot Weave (non-blocking): replace exactly
+        target_words_count UNIQUE Russian words with English (wrapped in <b>), scattered.
+        Returns processed HTML only.
         """
         if target_words_count <= 0:
             return html
@@ -129,13 +138,13 @@ class OpenRouterTranslator:
 
         user = (
             "Process the following HTML. Replace exactly "
-            f"{target_words_count} Russian words with English equivalents, scattered randomly. "
-            "Wrap every English word in <b> tags. Preserve all HTML structure. "
-            "Reply with ONLY the processed HTML, nothing else.\n\n"
+            f"{target_words_count} UNIQUE Russian words with English equivalents, scattered randomly. "
+            "Do not repeat the same Russian or English word. Wrap every English word in <b> tags. "
+            "Preserve all HTML structure. Reply with ONLY the processed HTML, nothing else.\n\n"
             + html
         )
 
-        resp = self.client.chat.completions.create(
+        resp = await self.async_client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system},

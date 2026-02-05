@@ -61,7 +61,7 @@ def _process_job(upload_id: str, job_id: str):
             return
 
         JOBS[job_id] = {"status": "running", "error": None, "output": None}
-        # weave_epub: Diglot Weave (word count + exact target, scattered AI replacement); TOC/nav excluded
+        # weave_epub: Diglot Weave (unique-words prompt, Semaphore 20, AsyncOpenAI); word count before AI
         _, output_path = weave_epub(
             input_epub_path=input_path,
             outputs_dir=str(OUTPUTS_DIR),

@@ -2,9 +2,7 @@ import asyncio
 import logging
 import os
 import re
-import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -63,24 +61,21 @@ def count_chapter_words(html: str) -> int:
     return sum(1 for t in tokens if any(c.isalpha() for c in t))
 
 
-def weave_chapter_html(
+async def _weave_chapter_async(
     html: str,
     ratio: float,
     translator: OpenRouterTranslator,
-    cache: Dict[str, str],
     options: WeaveOptions,
-    cache_lock: Optional[threading.Lock] = None,
 ) -> str:
     """
-    Diglot Weave: compute total word count and exact replacement count, send full chapter
-    to AI with optimized prompt. Returns weaved HTML. Raises on failure so caller can fallback.
+    Diglot Weave: word count happens before AI call; then non-blocking API.
+    Returns weaved HTML. Raises on failure so caller can fallback.
     """
     total_words = count_chapter_words(html)
     target_words_count = max(0, int(round(total_words * ratio)))
     if target_words_count == 0:
         return html
-
-    return translator.diglot_weave_chapter(
+    return await translator.diglot_weave_chapter(
         html, total_words, target_words_count, ratio=ratio
     )
 
@@ -110,18 +105,16 @@ def _get_item_id(item, idx: int):
     return f"item_{idx}"
 
 
-def _process_single_chapter(
+async def _process_single_chapter_async(
     idx: int,
     item,
     total: int,
     translator: OpenRouterTranslator,
-    cache: Dict[str, str],
-    cache_lock: threading.Lock,
     options: WeaveOptions,
 ) -> Tuple[str, str]:
     """
-    Process one chapter. Returns (item_id, html). NEVER returns None for html.
-    On ANY error (timeout, API error, empty response), returns (item_id, original_html).
+    Process one chapter (non-blocking). Word count before AI call. Returns (item_id, html).
+    On ANY error, returns (item_id, original_html).
     """
     item_id = _get_item_id(item, idx)
     chapter_num = idx + 1
@@ -133,9 +126,7 @@ def _process_single_chapter(
 
     try:
         ratio = chapter_target_ratio(idx, total)
-        weaved = weave_chapter_html(
-            original, ratio, translator, cache, options, cache_lock=cache_lock
-        )
+        weaved = await _weave_chapter_async(original, ratio, translator, options)
         if weaved is None or not isinstance(weaved, str):
             weaved = original
         result = str(weaved)
@@ -170,26 +161,14 @@ async def _weave_epub_async(
     ]
 
     translator = OpenRouterTranslator()
-    cache: Dict[str, str] = {}
-    cache_lock = threading.Lock()
     total = len(items)
 
-    sem = asyncio.Semaphore(5)
-    executor = ThreadPoolExecutor(max_workers=5)
-    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(20)
 
     async def process_chapter_async(idx: int, item):
         async with sem:
-            return await loop.run_in_executor(
-                executor,
-                _process_single_chapter,
-                idx,
-                item,
-                total,
-                translator,
-                cache,
-                cache_lock,
-                options,
+            return await _process_single_chapter_async(
+                idx, item, total, translator, options
             )
 
     tasks = [process_chapter_async(idx, item) for idx, item in enumerate(items)]
