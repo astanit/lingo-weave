@@ -1,15 +1,48 @@
+import asyncio
 import json
+import logging
 import os
 import re
 from typing import Dict, Iterable, List, Optional
 
 from openai import AsyncOpenAI, OpenAI
 
+logger = logging.getLogger(__name__)
+
 FALLBACK_MODEL = "openai/gpt-4o-mini"
+TIER2_MODEL = "openai/gpt-4o-mini"
+TIER3_MODEL = "google/gemini-2.0-flash-001"
+TIER1_ATTEMPTS = 3
+TIER1_DELAY_SEC = 5
+TIER2_ATTEMPTS = 2
+TIER3_ATTEMPTS = 2
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """True if we should try next tier (404, 502, 503, JSON, protocol, etc.)."""
+    msg = str(exc).lower()
+    if isinstance(exc, json.JSONDecodeError):
+        return True
+    try:
+        import httpx
+        if isinstance(exc, httpx.RemoteProtocolError):
+            return True
+    except ImportError:
+        pass
+    if "model" in msg and "not found" in msg:
+        return True
+    if "502" in msg or "503" in msg or "504" in msg:
+        return True
+    if hasattr(exc, "status_code"):
+        if getattr(exc, "status_code") in (404, 502, 503, 504):
+            return True
+    if hasattr(exc, "response") and getattr(exc.response, "status_code", None) in (404, 502, 503, 504):
+        return True
+    return False
 
 
 def _is_model_not_found_error(exc: Exception) -> bool:
-    """True if API returned 404 or 'Model not found'."""
+    """True if API returned 404 or 'Model not found' (for sync fallback)."""
     msg = str(exc).lower()
     if "model" in msg and "not found" in msg:
         return True
@@ -18,6 +51,7 @@ def _is_model_not_found_error(exc: Exception) -> bool:
     if hasattr(exc, "response") and getattr(exc.response, "status_code", None) == 404:
         return True
     return False
+
 
 DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher.
 
@@ -153,6 +187,33 @@ class OpenRouterTranslator:
             mapping.update(self.translate_words_ru_to_en(buf))
         return mapping
 
+    async def _call_chapter_once(
+        self, model_id: str, system: str, user: str
+    ) -> Optional[str]:
+        """One API call for a chapter. Returns parsed HTML or None on failure."""
+        try:
+            print(f"DEBUG: Using model slug '{model_id}'")
+            resp = await self.async_client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.3,
+            )
+        except Exception as e:
+            if _is_retryable_error(e):
+                logger.debug("Chapter call failed (retryable): %s", e)
+                return None
+            raise
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            return None
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:html)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        return content.strip()
+
     async def diglot_weave_chapter(
         self,
         html: str,
@@ -164,8 +225,9 @@ class OpenRouterTranslator:
         already_glossaried: Optional[set] = None,
     ) -> str:
         """
-        Process a full chapter HTML with Diglot Weave (non-blocking). Returns HTML:
-        [GLOSSARY] + <hr /> + [TRANSLATED TEXT]. Smart glossary: 10-15 sophisticated words only; no repeats from previous chapters.
+        Process a full chapter HTML with Diglot Weave. Triple-tier fallback:
+        Tier 1 = selected model (3 attempts, 5s delay), Tier 2 = gpt-4o-mini (2 attempts),
+        Tier 3 = gemini-2.0-flash (2 attempts). If all fail, return original HTML.
         """
         if target_words_count <= 0:
             return html
@@ -206,37 +268,41 @@ class OpenRouterTranslator:
             + html
         )
 
-        model_id = self.model
-        print(f"DEBUG: Using model slug '{model_id}'")
-        try:
-            resp = await self.async_client.chat.completions.create(
-                model=model_id,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=0.3,
-            )
-        except Exception as e:
-            if _is_model_not_found_error(e):
-                print(f"DEBUG: Retrying with fallback '{FALLBACK_MODEL}'")
-                resp = await self.async_client.chat.completions.create(
-                    model=FALLBACK_MODEL,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    temperature=0.3,
-                )
-            else:
-                raise
-        content = (resp.choices[0].message.content or "").strip()
-        if not content:
-            return html
+        # Tier 1: selected model, 3 attempts, 5s delay
+        for attempt in range(TIER1_ATTEMPTS):
+            try:
+                out = await self._call_chapter_once(self.model, system, user)
+                if out:
+                    return out
+            except Exception as e:
+                if not _is_retryable_error(e):
+                    raise
+                logger.debug("Tier 1 attempt %s: %s", attempt + 1, e)
+            if attempt < TIER1_ATTEMPTS - 1:
+                await asyncio.sleep(TIER1_DELAY_SEC)
 
-        # Strip markdown code block if present
-        if content.startswith("```"):
-            content = re.sub(r"^```(?:html)?\s*", "", content)
-            content = re.sub(r"\s*```$", "", content)
-        return content.strip()
+        # Tier 2: gpt-4o-mini, 2 attempts
+        for attempt in range(TIER2_ATTEMPTS):
+            try:
+                out = await self._call_chapter_once(TIER2_MODEL, system, user)
+                if out:
+                    return out
+            except Exception as e:
+                if not _is_retryable_error(e):
+                    raise
+                logger.debug("Tier 2 attempt %s: %s", attempt + 1, e)
+
+        # Tier 3: gemini-2.0-flash, 2 attempts
+        for attempt in range(TIER3_ATTEMPTS):
+            try:
+                out = await self._call_chapter_once(TIER3_MODEL, system, user)
+                if out:
+                    return out
+            except Exception as e:
+                if not _is_retryable_error(e):
+                    raise
+                logger.debug("Tier 3 attempt %s: %s", attempt + 1, e)
+
+        # Ultimate safety: return original
+        return html
 

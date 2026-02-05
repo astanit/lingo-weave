@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional
 # Throttle progress edits to avoid Telegram rate limits (max once per N seconds)
 PROGRESS_EDIT_THROTTLE_SECONDS = 4
 
+# Global queue: only 2 books processed at a time
+GLOBAL_BOOK_SEMAPHORE = asyncio.Semaphore(2)
+_running_books = 0
+_queue_waiting = 0
+
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
     CallbackQuery,
@@ -102,6 +107,55 @@ async def _notify_admin(bot: Bot, text: str) -> None:
             logger.warning("Failed to notify admin: %s", e)
 
 
+def _books_ahead_text(n: int) -> str:
+    """Russian: '0 книг', '1 книга', '2 книги', '5 книг'."""
+    if n == 0:
+        return "0 книг"
+    if n == 1:
+        return "1 книга"
+    if 2 <= n <= 4:
+        return f"{n} книги"
+    return f"{n} книг"
+
+
+async def _run_with_semaphore(
+    bot: Bot,
+    chat_id: int,
+    input_path: str,
+    ext: str,
+    result_filename: str,
+    model_id: Optional[str] = None,
+    *,
+    paid: bool = False,
+    user_username: Optional[str] = None,
+    user_id: Optional[int] = None,
+    file_name: Optional[str] = None,
+):
+    """Acquire global book semaphore (wait in queue), then run translation. Only 2 books at a time."""
+    global _running_books, _queue_waiting
+    _queue_waiting += 1
+    n_ahead = _running_books + _queue_waiting - 1
+    try:
+        await bot.send_message(
+            chat_id,
+            f"Вы в очереди. Перед вами {_books_ahead_text(n_ahead)}. "
+            "Как только освободится место, перевод начнется автоматически.",
+        )
+    except Exception as e:
+        logger.warning("Queue message failed: %s", e)
+    await GLOBAL_BOOK_SEMAPHORE.acquire()
+    try:
+        _queue_waiting -= 1
+        _running_books += 1
+        await _do_translation_flow(
+            bot, chat_id, input_path, ext, result_filename, model_id=model_id,
+            paid=paid, user_username=user_username, user_id=user_id, file_name=file_name,
+        )
+    finally:
+        _running_books -= 1
+        GLOBAL_BOOK_SEMAPHORE.release()
+
+
 async def _run_translation(
     input_path: str,
     ext: str,
@@ -109,8 +163,8 @@ async def _run_translation(
     chat_id: int,
     bot: Bot,
     model_id: Optional[str] = None,
-) -> Optional[str]:
-    """Run the appropriate weaver; progress_callback(current, total) if provided. Returns output path or None."""
+) -> Optional[tuple]:
+    """Run the appropriate weaver. Returns (output_path, failed_count, total_chapters) or None."""
     from app.services.epub_weave import WeaveOptions, run_weave_epub_async
     from app.services.txt_weave import run_weave_txt_async
     from app.services.fb2_weave import run_weave_fb2_async
@@ -124,20 +178,22 @@ async def _run_translation(
 
     try:
         if ext == ".epub":
-            _, output_path = await run_weave_epub_async(
+            _, output_path, failed_count, total = await run_weave_epub_async(
                 input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id
             )
+            return (output_path, failed_count, total)
         elif ext == ".txt":
             _, output_path = await run_weave_txt_async(
                 input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id
             )
+            return (output_path, 0, 0)
         elif ext == ".fb2":
             _, output_path = await run_weave_fb2_async(
                 input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id
             )
+            return (output_path, 0, 0)
         else:
             return None
-        return output_path
     except Exception as e:
         logger.exception("Translation failed: %s", e)
         return None
@@ -211,11 +267,21 @@ async def _do_translation_flow(
                 if "message is not modified" not in msg and "same content" not in msg:
                     logger.debug("Progress edit failed: %s", e)
 
-        output_path = await _run_translation(
+        result = await _run_translation(
             input_path, ext, progress_callback, chat_id, bot, model_id=model_id
         )
+        if not result:
+            raise RuntimeError("Translation produced no output")
+        output_path, failed_count, total_chapters = result
         if not output_path or not os.path.exists(output_path):
             raise RuntimeError("Translation produced no output")
+
+        if total_chapters > 0 and failed_count / total_chapters > 0.1:
+            await _notify_admin(
+                bot,
+                f"⚠️ Книга завершена с большим числом сбоев: {failed_count}/{total_chapters} глав заменены оригиналом "
+                f"(>{10}%). Файл: {file_name or result_filename}",
+            )
 
         # Final status before sending file
         try:
@@ -379,7 +445,7 @@ async def on_model_choice(callback: CallbackQuery, bot: Bot):
             return
         result_name = "lingoweave" + ext
         asyncio.create_task(
-            _do_translation_flow(
+            _run_with_semaphore(
                 bot, chat_id, str(dest), ext, result_name, model_id=model_id,
                 paid=False, user_username=callback.from_user.username, user_id=callback.from_user.id, file_name=file_name,
             )
@@ -453,7 +519,7 @@ async def on_successful_payment(message: Message, bot: Bot):
     model_id = data.get("model_id")
     result_name = "lingoweave" + ext
     asyncio.create_task(
-        _do_translation_flow(
+        _run_with_semaphore(
             bot, chat_id, str(dest), ext, result_name, model_id=model_id,
             paid=True, user_username=message.from_user.username, user_id=message.from_user.id, file_name=file_name,
         )

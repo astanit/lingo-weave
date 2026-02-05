@@ -255,6 +255,7 @@ async def _weave_epub_async(
 
     translator = OpenRouterTranslator(model=model_id)
     total = len(items)
+    failed_count = 0
     global_vocab: Dict[str, str] = {}  # Russian -> English across chapters
     already_glossaried: Set[str] = set()  # English words already in previous glossaries (smart glossary memory)
     translated_items: Dict[str, str] = {}
@@ -281,12 +282,17 @@ async def _weave_epub_async(
             else:
                 original_html = _get_item_html(item)
                 translated_items[item_id] = original_html if original_html is not None else ""
+                failed_count += 1
                 print(f"Chapter {idx + 1}: No result, using original", flush=True)
         except Exception as e:
             logger.warning("Chapter %s raised %s, keeping original", idx + 1, e)
             print(f"Chapter {idx + 1}: Failed, using fallback", flush=True)
             original_html = _get_item_html(item)
             translated_items[item_id] = original_html if original_html is not None else ""
+            failed_count += 1
+
+    if failed_count > 0:
+        logger.info("Book finished with %s failed chapters replaced by original text.", failed_count)
 
     # Strict exclusion: never call set_content on toc, nav, ncx, style, image (leave original in object)
     EXCLUDED_SUBSTRINGS = ("toc", "nav", "ncx", "style", "image")
@@ -310,6 +316,8 @@ async def _weave_epub_async(
             continue
 
         new_text = translated_items[item_id]
+        if new_text is None or not new_text:
+            new_text = _get_item_html(item) or ""
         if new_text:
             print(f"Updating content for: {item_id}", flush=True)
             try:
@@ -321,7 +329,7 @@ async def _weave_epub_async(
 
     output_path = str(out_dir / "lingoweave.epub")
     epub.write_epub(output_path, book)
-    return job_id, output_path
+    return job_id, output_path, failed_count, total
 
 
 def weave_epub(
@@ -334,13 +342,14 @@ def weave_epub(
     Returns (job_id, output_epub_path).
     """
     options = options or WeaveOptions()
-    return asyncio.run(
+    job_id, output_path, *_ = asyncio.run(
         _weave_epub_async(
             input_epub_path=input_epub_path,
             outputs_dir=outputs_dir,
             options=options,
         )
     )
+    return job_id, output_path
 
 
 async def run_weave_epub_async(
@@ -349,8 +358,8 @@ async def run_weave_epub_async(
     options: WeaveOptions | None = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
-) -> Tuple[str, str]:
-    """Async entry point for EPUB weave with optional progress (e.g. for Telegram bot)."""
+) -> Tuple[str, str, int, int]:
+    """Async entry point for EPUB weave. Returns (job_id, output_path, failed_count, total_chapters)."""
     options = options or WeaveOptions()
     return await _weave_epub_async(
         input_epub_path=input_epub_path,
