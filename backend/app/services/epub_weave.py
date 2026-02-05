@@ -163,7 +163,7 @@ async def _weave_epub_async(
     translator = OpenRouterTranslator()
     total = len(items)
 
-    sem = asyncio.Semaphore(20)
+    sem = asyncio.Semaphore(30)
 
     async def process_chapter_async(idx: int, item):
         async with sem:
