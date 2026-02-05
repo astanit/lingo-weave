@@ -149,6 +149,19 @@ def _get_item_html(item) -> str:
         return str(raw) if raw is not None else ""
 
 
+def _get_item_id(item, idx: int):
+    """Stable id for an item; use for matching results to items."""
+    got = getattr(item, "get_id", None)
+    if got is not None:
+        try:
+            id_val = got()
+            if id_val is not None:
+                return str(id_val)
+        except Exception:
+            pass
+    return f"item_{idx}"
+
+
 def _process_single_chapter(
     idx: int,
     item,
@@ -157,11 +170,12 @@ def _process_single_chapter(
     cache: Dict[str, str],
     cache_lock: threading.Lock,
     options: WeaveOptions,
-) -> Tuple[int, str]:
+) -> Tuple[str, str]:
     """
-    Process one chapter. Returns (idx, html). NEVER returns None for html.
-    On ANY error (timeout, API error, empty response), returns (idx, original_html).
+    Process one chapter. Returns (item_id, html). NEVER returns None for html.
+    On ANY error (timeout, API error, empty response), returns (item_id, original_html).
     """
+    item_id = _get_item_id(item, idx)
     chapter_num = idx + 1
     logger.info("Started chapter %s", chapter_num)
     original = _get_item_html(item)
@@ -174,7 +188,6 @@ def _process_single_chapter(
         weaved = weave_chapter_html(
             original, ratio, translator, cache, options, cache_lock=cache_lock
         )
-        # Forced fallback: never return None or non-string
         if weaved is None or not isinstance(weaved, str):
             weaved = original
         result = str(weaved)
@@ -183,7 +196,7 @@ def _process_single_chapter(
         result = original
 
     logger.info("Finished chapter %s", chapter_num)
-    return (idx, result)
+    return (item_id, result)
 
 
 async def _weave_epub_async(
@@ -217,7 +230,7 @@ async def _weave_epub_async(
     executor = ThreadPoolExecutor(max_workers=5)
     loop = asyncio.get_event_loop()
 
-    async def process_chapter_async(idx: int, item) -> Tuple[int, str]:
+    async def process_chapter_async(idx: int, item):
         async with sem:
             return await loop.run_in_executor(
                 executor,
@@ -234,28 +247,55 @@ async def _weave_epub_async(
     tasks = [process_chapter_async(idx, item) for idx, item in enumerate(items)]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # Match by ID: store translated content (string) by item_id to avoid index mismatch
+    results_by_id: Dict[str, str] = {}
     for i, r in enumerate(results):
-        chapter_num = i + 1
+        item_id = _get_item_id(items[i], i)
         if isinstance(r, Exception):
-            logger.warning("Chapter %s raised %s, keeping original", chapter_num, r)
-            print(f"Chapter {chapter_num}: Failed, using fallback", flush=True)
+            logger.warning("Chapter %s raised %s, keeping original", i + 1, r)
+            print(f"Chapter {i + 1}: Failed, using fallback", flush=True)
             original_html = _get_item_html(items[i])
-            final_content = original_html if original_html is not None else ""
-            final_content = str(final_content)
-            items[i].set_content(final_content.encode("utf-8"))
+            results_by_id[item_id] = original_html if original_html is not None else ""
         else:
-            idx, translated_html = r
-            original_html = _get_item_html(items[idx])
-            # Content validation: never pass None to set_content
-            final_content = (
-                translated_html
-                if translated_html is not None and isinstance(translated_html, str)
-                else (original_html if original_html is not None else "")
+            rid, html = r
+            results_by_id[rid] = html if (html is not None and isinstance(html, str)) else _get_item_html(items[i]) or ""
+            print(f"Chapter {i + 1}: Success", flush=True)
+
+    # Final assembly: apply results by item ID with strict None-safety
+    for idx, item in enumerate(items):
+        item_id = _get_item_id(item, idx)
+        original_content = item.get_content()
+        # Only call set_content on items that have content (skip empty/None)
+        if original_content is None:
+            print(f"Skipping item {item_id}: get_content() was None", flush=True)
+            continue
+        if isinstance(original_content, bytes) and len(original_content) == 0:
+            print(f"Skipping item {item_id}: get_content() was empty bytes", flush=True)
+            continue
+
+        translated_content = results_by_id.get(item_id)
+        # Global Content Guard: never pass None to set_content
+        if translated_content is None:
+            print(
+                f"WARNING: Item {item_id} has None content. Reverting to original.",
+                flush=True,
             )
-            final_content = str(final_content)
-            content_bytes = final_content.encode("utf-8")
-            items[idx].set_content(content_bytes)
-            print(f"Chapter {idx + 1}: Success", flush=True)
+            translated_content = original_content
+
+        # Strict type conversion: ensure bytes for set_content
+        if isinstance(translated_content, str):
+            content_bytes = translated_content.encode("utf-8")
+        elif translated_content is not None:
+            content_bytes = (
+                translated_content
+                if isinstance(translated_content, bytes)
+                else str(translated_content).encode("utf-8")
+            )
+        else:
+            content_bytes = original_content if isinstance(original_content, bytes) else b""
+
+        print(f"Assembling item: [{item_id}]", flush=True)
+        item.set_content(content_bytes)
 
     output_path = str(out_dir / "lingoweave.epub")
     epub.write_epub(output_path, book)
