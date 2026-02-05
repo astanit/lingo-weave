@@ -101,11 +101,11 @@ async def download(job_id: str):
 
 @app.get("/api/config")
 async def config():
-    # API key is read from OPENROUTER_API_KEY env var (see app.services.openrouter_translate).
+    # API key and model from env (see app.services.openrouter_translate).
     return JSONResponse(
         {
             "has_openrouter_key": bool(os.getenv("OPENROUTER_API_KEY")),
-            "model": "google/gemini-flash-1.5-8b",
+            "model": os.getenv("OPENROUTER_MODEL", "google/gemini-flash-1.5"),
         }
     )
 

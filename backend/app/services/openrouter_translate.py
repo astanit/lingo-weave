@@ -17,7 +17,7 @@ class OpenRouterTranslator:
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
         )
-        self.model = "google/gemini-flash-1.5-8b"
+        self.model = os.getenv("OPENROUTER_MODEL", "google/gemini-flash-1.5")
 
     def translate_words_ru_to_en(self, words: List[str]) -> Dict[str, str]:
         """
