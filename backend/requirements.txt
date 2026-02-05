@@ -5,3 +5,4 @@ ebooklib
 beautifulsoup4
 openai
 pydantic
+lxml

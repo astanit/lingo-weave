@@ -45,9 +45,11 @@ export default function Home() {
     return () => clearInterval(t);
   }, [jobId, status, pollJob]);
 
+  const allowedExtensions = [".epub", ".txt", ".fb2"];
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
-    if (f && f.name.toLowerCase().endsWith(".epub")) {
+    const ok = f && allowedExtensions.some((ext) => f.name.toLowerCase().endsWith(ext));
+    if (ok) {
       setFile(f);
       setUploadId(null);
       setJobId(null);
@@ -117,7 +119,7 @@ export default function Home() {
             LingoWeave
           </h1>
           <p className="mt-2 text-zinc-400">
-            Russian EPUB → Diglot Weave (0% → 100% English, bolded)
+            Russian EPUB / TXT / FB2 → Diglot Weave (5% → 100% English, glossary)
           </p>
         </header>
 
@@ -134,11 +136,11 @@ export default function Home() {
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 space-y-4">
           <label className="block text-sm font-medium text-zinc-300">
-            Choose EPUB
+            Choose file (.epub, .txt, or .fb2)
           </label>
           <input
             type="file"
-            accept=".epub"
+            accept=".epub,.txt,.fb2"
             onChange={onFileChange}
             className="block w-full text-sm text-zinc-400 file:mr-4 file:rounded-lg file:border-0 file:bg-zinc-700 file:px-4 file:py-2 file:text-zinc-100 file:cursor-pointer hover:file:bg-zinc-600"
           />
@@ -171,7 +173,7 @@ export default function Home() {
                 onClick={download}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
               >
-                Download EPUB
+                Download file
               </button>
             )}
           </div>

@@ -121,6 +121,43 @@ async def _weave_chapter_async(
     )
 
 
+async def process_one_segment_async(
+    segment_html: str,
+    segment_index: int,
+    total_segments: int,
+    translator: OpenRouterTranslator,
+    options: WeaveOptions,
+    global_vocab: Dict[str, str],
+    already_glossaried: Set[str],
+) -> str:
+    """
+    Process one segment (virtual chapter) with Diglot Weave. Updates global_vocab and already_glossaried.
+    Used by TXT and FB2 weavers. Returns weaved HTML.
+    """
+    ratio = chapter_target_ratio(segment_index, total_segments)
+    target_percent = round(ratio * 100)
+    logger.info("Segment %s/%s: target %s%%", segment_index + 1, total_segments, target_percent)
+    weaved = await _weave_chapter_async(
+        segment_html,
+        ratio,
+        translator,
+        options,
+        target_percent=float(target_percent),
+        previous_vocab=global_vocab,
+        already_glossaried=already_glossaried,
+    )
+    extract_glossary_to_vocab(weaved, global_vocab, already_glossaried=already_glossaried)
+    return weaved
+
+
+def html_to_plain(html: str) -> str:
+    """Convert weaved HTML to plain text: preserve *word* for bold, strip other tags."""
+    # Mark bold before stripping tags
+    text = re.sub(r"<b>([^<]+)</b>", r"*\1*", html, flags=re.IGNORECASE)
+    soup = BeautifulSoup(text, "html.parser")
+    return soup.get_text(separator="\n").strip()
+
+
 def _get_item_html(item) -> str:
     raw = item.get_content()
     try:

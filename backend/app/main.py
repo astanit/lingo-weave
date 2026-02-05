@@ -12,9 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.services.epub_weave import WeaveOptions, weave_epub
+from app.services.txt_weave import weave_txt
+from app.services.fb2_weave import weave_fb2
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+ALLOWED_EXTENSIONS = (".epub", ".txt", ".fb2")
 UPLOADS_DIR = BASE_DIR / "uploads"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 
@@ -40,33 +43,72 @@ def health():
     return {"ok": True}
 
 
+def _get_upload_extension(filename: str) -> str:
+    if not filename:
+        return ""
+    lower = filename.lower()
+    for ext in ALLOWED_EXTENSIONS:
+        if lower.endswith(ext):
+            return ext
+    return ""
+
+
 @app.post("/api/upload")
-async def upload_epub(file: UploadFile = File(...)):
-    if not file.filename or not file.filename.lower().endswith(".epub"):
-        raise HTTPException(status_code=400, detail="Please upload an .epub file")
+async def upload_file(file: UploadFile = File(...)):
+    ext = _get_upload_extension(file.filename or "")
+    if not ext:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload an .epub, .txt, or .fb2 file",
+        )
 
     upload_id = uuid.uuid4().hex
-    dest = UPLOADS_DIR / f"{upload_id}.epub"
+    dest = UPLOADS_DIR / f"{upload_id}{ext}"
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    return {"upload_id": upload_id}
+    return {"upload_id": upload_id, "extension": ext}
 
 
 def _process_job(upload_id: str, job_id: str):
     try:
-        input_path = str(UPLOADS_DIR / f"{upload_id}.epub")
-        if not os.path.exists(input_path):
+        input_path = None
+        ext = None
+        for e in ALLOWED_EXTENSIONS:
+            candidate = UPLOADS_DIR / f"{upload_id}{e}"
+            if candidate.exists():
+                input_path = str(candidate)
+                ext = e
+                break
+        if not input_path or not os.path.exists(input_path):
             JOBS[job_id] = {"status": "error", "error": "Upload not found", "output": None}
             return
 
         JOBS[job_id] = {"status": "running", "error": None, "output": None}
-        # weave_epub: Diglot Weave + chapter glossary (Vocabulary at top), global vocab tracking, sequential chapters
-        _, output_path = weave_epub(
-            input_epub_path=input_path,
-            outputs_dir=str(OUTPUTS_DIR),
-            options=WeaveOptions(bold_translations=True),
-        )
+        opts = WeaveOptions(bold_translations=True)
+
+        if ext == ".epub":
+            _, output_path = weave_epub(
+                input_epub_path=input_path,
+                outputs_dir=str(OUTPUTS_DIR),
+                options=opts,
+            )
+        elif ext == ".txt":
+            _, output_path = weave_txt(
+                input_txt_path=input_path,
+                outputs_dir=str(OUTPUTS_DIR),
+                options=opts,
+            )
+        elif ext == ".fb2":
+            _, output_path = weave_fb2(
+                input_fb2_path=input_path,
+                outputs_dir=str(OUTPUTS_DIR),
+                options=opts,
+            )
+        else:
+            JOBS[job_id] = {"status": "error", "error": "Unsupported format", "output": None}
+            return
+
         JOBS[job_id] = {"status": "done", "error": None, "output": output_path}
     except Exception as e:
         JOBS[job_id] = {"status": "error", "error": str(e), "output": None}
@@ -88,6 +130,15 @@ async def job_status(job_id: str):
     return {"job_id": job_id, **job}
 
 
+def _media_type_and_filename(path: str) -> tuple:
+    p = path.lower()
+    if p.endswith(".txt"):
+        return "text/plain; charset=utf-8", "lingoweave.txt"
+    if p.endswith(".fb2"):
+        return "application/xml", "lingoweave.fb2"
+    return "application/epub+zip", "lingoweave.epub"
+
+
 @app.get("/api/download/{job_id}")
 async def download(job_id: str):
     job = JOBS.get(job_id)
@@ -96,11 +147,8 @@ async def download(job_id: str):
     if job["status"] != "done" or not job["output"]:
         raise HTTPException(status_code=400, detail="Job not finished")
     path = job["output"]
-    return FileResponse(
-        path,
-        media_type="application/epub+zip",
-        filename="lingoweave.epub",
-    )
+    media_type, filename = _media_type_and_filename(path)
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 @app.get("/api/config")
