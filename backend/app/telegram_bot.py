@@ -34,13 +34,20 @@ logger = logging.getLogger(__name__)
 ADMIN_USERNAME = "qaskar"
 STARS_CURRENCY = "XTR"
 
-# Tier: (model_id, amount in Stars) — slugs per OpenRouter docs
-MODEL_FAST = "google/gemini-2.0-flash-001"
-MODEL_PREMIUM = "anthropic/claude-3.5-sonnet"
+# Max file size: 20 MB
+FILE_SIZE_LIMIT_BYTES = 20 * 1024 * 1024
+
+# Tier: (model_id, amount in Stars) — 5 options per OpenRouter
+# Standard (100–150): DeepSeek, Gemini Flash, GPT-4o Mini
+# Premium (500–700): GPT-4o, Claude 3.5 Sonnet
+TIERS = {
+    "deepseek": ("deepseek/deepseek-chat", 100),
+    "gemini": ("google/gemini-2.0-flash-001", 150),
+    "gpt4omini": ("openai/gpt-4o-mini", 150),
+    "gpt4o": ("openai/gpt-4o", 500),
+    "claude": ("anthropic/claude-3.5-sonnet", 700),
+}
 FALLBACK_MODEL = "openai/gpt-4o-mini"
-PRICE_FAST = 100
-PRICE_PREMIUM = 200
-TIERS = {"fast": (MODEL_FAST, PRICE_FAST), "premium": (MODEL_PREMIUM, PRICE_PREMIUM)}
 
 # Pending model choice: choice_id -> { "file_id", "chat_id", "user_id", "file_name", "is_admin" }
 _pending_choice: Dict[str, Dict[str, Any]] = {}
@@ -258,18 +265,11 @@ async def _do_translation_flow(
 
 def _model_choice_keyboard(choice_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="⚡ Быстрый (Gemini Flash) — 100 звёзд",
-                callback_data=f"tier:{choice_id}:fast",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="💎 Премиум (Claude) — 200 звёзд",
-                callback_data=f"tier:{choice_id}:premium",
-            ),
-        ],
+        [InlineKeyboardButton(text="🇨🇳 DeepSeek V3 (Smart & Cheap) — 100 звёзд", callback_data=f"tier:{choice_id}:deepseek")],
+        [InlineKeyboardButton(text="⚡ Gemini 2.0 Flash (Fastest) — 150 звёзд", callback_data=f"tier:{choice_id}:gemini")],
+        [InlineKeyboardButton(text="🍏 GPT-4o Mini (Balanced) — 150 звёзд", callback_data=f"tier:{choice_id}:gpt4omini")],
+        [InlineKeyboardButton(text="🤖 GPT-4o (Powerful) — 500 звёзд", callback_data=f"tier:{choice_id}:gpt4o")],
+        [InlineKeyboardButton(text="💎 Claude 3.5 Sonnet (ULTRA PREMIUM) — 700 звёзд", callback_data=f"tier:{choice_id}:claude")],
     ])
 
 
@@ -282,6 +282,14 @@ async def on_document(message: Message, bot: Bot):
     if not ext:
         await message.answer(
             "Отправьте файл в формате EPUB, TXT или FB2."
+        )
+        return
+
+    file_size = getattr(message.document, "file_size", None) or 0
+    if file_size > FILE_SIZE_LIMIT_BYTES:
+        await message.answer(
+            "⚠️ Файл слишком большой. Для стабильной работы я принимаю книги до 20 МБ. "
+            "Пожалуйста, попробуйте сжать файл или выбрать другой.",
         )
         return
 
