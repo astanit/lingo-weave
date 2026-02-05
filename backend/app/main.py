@@ -61,6 +61,7 @@ def _process_job(upload_id: str, job_id: str):
             return
 
         JOBS[job_id] = {"status": "running", "error": None, "output": None}
+        # weave_epub guarantees item.set_content() never receives None (fallback to original text on any failure)
         _, output_path = weave_epub(
             input_epub_path=input_path,
             outputs_dir=str(OUTPUTS_DIR),

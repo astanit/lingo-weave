@@ -99,16 +99,20 @@ def weave_chapter_html(
                     needed_words.append(w)
         per_node_tokens.append((node, tokens, list(translate_positions)))
 
-    # Translate missing words (batched); AI failure will raise
+    # Translate missing words (batched). On ANY AI error (timeout, API, empty), skip translation for this batch.
     if needed_words:
-        mapping = translator.translate_words_in_batches(needed_words)
-        if mapping is None:
-            mapping = {}
-        if cache_lock:
-            with cache_lock:
+        try:
+            mapping = translator.translate_words_in_batches(needed_words)
+            if mapping is None:
+                mapping = {}
+            if cache_lock:
+                with cache_lock:
+                    cache.update(mapping)
+            else:
                 cache.update(mapping)
-        else:
-            cache.update(mapping)
+        except Exception:
+            # Fallback: leave mapping empty so cache.get(ru, ru) keeps original; caller can still get valid HTML
+            pass
 
     # Second pass: apply translations with bolding
     for node, tokens, translate_positions in per_node_tokens:
@@ -136,11 +140,13 @@ def weave_chapter_html(
 def _get_item_html(item) -> str:
     raw = item.get_content()
     try:
+        if raw is None:
+            return ""
         if isinstance(raw, bytes):
             return raw.decode("utf-8", errors="ignore")
-        return str(raw) if raw else ""
+        return str(raw)
     except Exception:
-        return str(raw) if raw else ""
+        return str(raw) if raw is not None else ""
 
 
 def _process_single_chapter(
@@ -152,22 +158,32 @@ def _process_single_chapter(
     cache_lock: threading.Lock,
     options: WeaveOptions,
 ) -> Tuple[int, str]:
-    """Process one chapter. Returns (idx, html). On any failure, returns (idx, original_html)."""
+    """
+    Process one chapter. Returns (idx, html). NEVER returns None for html.
+    On ANY error (timeout, API error, empty response), returns (idx, original_html).
+    """
     chapter_num = idx + 1
     logger.info("Started chapter %s", chapter_num)
     original = _get_item_html(item)
-    ratio = chapter_target_ratio(idx, total)
+    if original is None:
+        original = ""
+    original = str(original)
+
     try:
+        ratio = chapter_target_ratio(idx, total)
         weaved = weave_chapter_html(
             original, ratio, translator, cache, options, cache_lock=cache_lock
         )
+        # Forced fallback: never return None or non-string
         if weaved is None or not isinstance(weaved, str):
             weaved = original
+        result = str(weaved)
     except Exception as e:
         logger.warning("Chapter %s failed (%s), using original text", chapter_num, e)
-        weaved = original
+        result = original
+
     logger.info("Finished chapter %s", chapter_num)
-    return (idx, weaved)
+    return (idx, result)
 
 
 async def _weave_epub_async(
@@ -219,14 +235,27 @@ async def _weave_epub_async(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for i, r in enumerate(results):
+        chapter_num = i + 1
         if isinstance(r, Exception):
-            logger.warning("Chapter %s raised %s, keeping original", i + 1, r)
-            original = _get_item_html(items[i])
-            items[i].set_content(original.encode("utf-8"))
+            logger.warning("Chapter %s raised %s, keeping original", chapter_num, r)
+            print(f"Chapter {chapter_num}: Failed, using fallback", flush=True)
+            original_html = _get_item_html(items[i])
+            final_content = original_html if original_html is not None else ""
+            final_content = str(final_content)
+            items[i].set_content(final_content.encode("utf-8"))
         else:
-            idx, weaved = r
-            content = weaved.encode("utf-8") if isinstance(weaved, str) else weaved
-            items[idx].set_content(content)
+            idx, translated_html = r
+            original_html = _get_item_html(items[idx])
+            # Content validation: never pass None to set_content
+            final_content = (
+                translated_html
+                if translated_html is not None and isinstance(translated_html, str)
+                else (original_html if original_html is not None else "")
+            )
+            final_content = str(final_content)
+            content_bytes = final_content.encode("utf-8")
+            items[idx].set_content(content_bytes)
+            print(f"Chapter {idx + 1}: Success", flush=True)
 
     output_path = str(out_dir / "lingoweave.epub")
     epub.write_epub(output_path, book)
