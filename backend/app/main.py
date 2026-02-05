@@ -20,21 +20,12 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="LingoWeave API")
 
-# CORS: configured only via CORS_ORIGINS env var.
-# Comma-separated list of allowed origins (e.g. https://your-frontend.up.railway.app).
-# Use "*" to allow any origin (credentials disabled). Default: http://localhost:3000
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").strip()
-if CORS_ORIGINS == "*":
-    _cors_origins = ["*"]
-    _cors_credentials = False
-else:
-    _cors_origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()] or ["http://localhost:3000"]
-    _cors_credentials = True
-
+# CORS: allow all origins so frontend (e.g. https://lingo-weave-production.up.railway.app) can call the API.
+# allow_credentials must be False when allow_origins is ["*"] (browser requirement).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=_cors_credentials,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
@@ -113,7 +104,7 @@ async def download(job_id: str):
 
 @app.get("/api/config")
 async def config():
-    # Helps the frontend show a warning if key is missing
+    # API key is read from OPENROUTER_API_KEY env var (see app.services.openrouter_translate).
     return JSONResponse(
         {
             "has_openrouter_key": bool(os.getenv("OPENROUTER_API_KEY")),
