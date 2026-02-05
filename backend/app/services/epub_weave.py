@@ -261,36 +261,36 @@ async def _weave_epub_async(
             translated_items[rid] = html if (html is not None and isinstance(html, str)) else _get_item_html(items[i]) or ""
             print(f"Chapter {i + 1}: Success", flush=True)
 
-    # Final assembly: apply results by item ID. Exclude TOC/nav/ncx — always use original.
-    for idx, item in enumerate(items):
-        item_id = _get_item_id(item, idx)
-        original_content = item.get_content()
+    # Strict exclusion: never call set_content on toc, nav, ncx, style, image (leave original in object)
+    EXCLUDED_SUBSTRINGS = ("toc", "nav", "ncx", "style", "image")
 
-        # Exclude TOC and Navigation: never translate items whose ID contains toc, nav, or ncx
+    for item in book.get_items():
+        item_id = getattr(item, "get_id", lambda: None)()
+        if item_id is None:
+            item_id = getattr(item, "identifier", None) or id(item)
+        item_id = str(item_id)
+
         id_lower = item_id.lower()
-        if "toc" in id_lower or "nav" in id_lower or "ncx" in id_lower:
-            # Always use original content for TOC/nav/ncx
-            new_content = original_content
+        if any(sub in id_lower for sub in EXCLUDED_SUBSTRINGS):
+            # Technical file: skip entirely, do not call set_content
+            continue
+
+        # Only call set_content for EpubHtml items that we translated
+        if not isinstance(item, epub.EpubHtml):
+            continue
+        if item_id not in translated_items:
+            print(f"Leaving original: {item_id}", flush=True)
+            continue
+
+        new_text = translated_items[item_id]
+        if new_text:
+            print(f"Updating content for: {item_id}", flush=True)
+            try:
+                item.set_content(new_text.encode("utf-8"))
+            except Exception as e:
+                print(f"Failed to set content for {item_id}: {e}", flush=True)
         else:
-            # Try to get translated version from our dictionary
-            translated_version = translated_items.get(item_id)
-            if translated_version is not None:
-                new_content = translated_version
-            else:
-                new_content = original_content
-
-        # Final safety check: if for some reason new_content is still None, use empty bytes
-        if new_content is None:
-            new_content = b""
-
-        # Ensure it is bytes (ebooklib set_content expects bytes)
-        if isinstance(new_content, str):
-            new_content = new_content.encode("utf-8")
-        elif not isinstance(new_content, bytes):
-            new_content = b""
-
-        print(f"Assembling item: [{item_id}]", flush=True)
-        item.set_content(new_content)
+            print(f"Skipping {item_id} - translation is empty", flush=True)
 
     output_path = str(out_dir / "lingoweave.epub")
     epub.write_epub(output_path, book)
