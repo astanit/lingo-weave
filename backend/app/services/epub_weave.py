@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import ebooklib
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
@@ -124,7 +125,7 @@ def weave_epub(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     book = epub.read_epub(input_epub_path)
-    items = list(book.get_items_of_type(epub.ITEM_DOCUMENT))
+    items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
 
     translator = OpenRouterTranslator()
     cache: Dict[str, str] = {}
@@ -132,9 +133,9 @@ def weave_epub(
     total = len(items)
     for idx, item in enumerate(items):
         ratio = chapter_target_ratio(idx, total)
-        raw = item.get_body_content()
+        raw = item.get_content()
         try:
-            html = raw.decode("utf-8", errors="ignore")
+            html = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
         except Exception:
             html = str(raw)
 
