@@ -1,11 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-
-const API_BASE =
-  typeof window !== "undefined"
-    ? (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000")
-    : "";
+import { getApiBase } from "./api";
 
 type JobStatus = "queued" | "running" | "done" | "error";
 
@@ -20,8 +16,9 @@ export default function Home() {
   const [processing, setProcessing] = useState(false);
 
   const fetchConfig = useCallback(async () => {
+    const apiBase = getApiBase();
     try {
-      const r = await fetch(`${API_BASE}/api/config`);
+      const r = await fetch(`${apiBase}/api/config`);
       if (r.ok) setConfig(await r.json());
     } catch {
       setConfig({ has_openrouter_key: false });
@@ -33,7 +30,8 @@ export default function Home() {
   }, [fetchConfig]);
 
   const pollJob = useCallback(async (id: string) => {
-    const res = await fetch(`${API_BASE}/api/status/${id}`);
+    const apiBase = getApiBase();
+    const res = await fetch(`${apiBase}/api/status/${id}`);
     if (!res.ok) return null;
     const data = await res.json();
     setStatus(data.status);
@@ -60,49 +58,55 @@ export default function Home() {
     }
   };
 
-  const upload = async () => {
+  const upload = async (e: React.MouseEvent) => {
+    e.preventDefault();
     if (!file) return;
     setUploading(true);
     setError(null);
+    const apiBase = getApiBase();
     try {
       const form = new FormData();
       form.append("file", file);
-      const r = await fetch(`${API_BASE}/api/upload`, {
+      const r = await fetch(`${apiBase}/api/upload`, {
         method: "POST",
         body: form,
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || "Upload failed");
       setUploadId(data.upload_id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Upload failed");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setUploading(false);
     }
   };
 
-  const process = async () => {
+  const process = async (e: React.MouseEvent) => {
+    e.preventDefault();
     if (!uploadId) return;
     setProcessing(true);
     setError(null);
+    const apiBase = getApiBase();
     try {
-      const r = await fetch(`${API_BASE}/api/process?upload_id=${uploadId}`, {
+      const r = await fetch(`${apiBase}/api/process?upload_id=${encodeURIComponent(uploadId)}`, {
         method: "POST",
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || "Process failed");
       setJobId(data.job_id);
       setStatus("queued");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Process failed");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Process failed");
     } finally {
       setProcessing(false);
     }
   };
 
-  const download = () => {
+  const download = (e: React.MouseEvent) => {
+    e.preventDefault();
     if (!jobId) return;
-    window.open(`${API_BASE}/api/download/${jobId}`, "_blank");
+    const apiBase = getApiBase();
+    window.open(`${apiBase}/api/download/${jobId}`, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -130,7 +134,7 @@ export default function Home() {
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 space-y-4">
           <label className="block text-sm font-medium text-zinc-300">
-            ­Choose EPUB
+            Choose EPUB
           </label>
           <input
             type="file"
