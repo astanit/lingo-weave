@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 from openai import AsyncOpenAI, OpenAI
 
@@ -16,9 +16,22 @@ Rules:
 5. FORMAT: Wrap every English word in <b>tags</b>. Example: <b>carriage</b>.
 6. NO REPETITION: Use unique words for translation within this segment.
 
-Text length: {total_words} words. You MUST add English replacements (wrapped in <b>) so that roughly {target_percent}% of the content is in English. Preserve all HTML tags (e.g. <p>, <div>, <br>).
+OUTPUT FORMAT (strict):
+Before the translated chapter text, generate a "Chapter Vocabulary" section.
+- Include ONLY unique words that you actually translated in this segment. If you translated no words, omit the glossary.
+- Format exactly as follows (use standard HTML so it looks good in any EPUB reader):
 
-Respond with ONLY the processed HTML document. No explanations, no markdown—just the raw HTML."""
+<h3>Vocabulary for this Chapter</h3>
+<ul>
+<li><b>English Word</b> — Russian Translation</li>
+<li><b>another</b> — другой</li>
+</ul>
+<hr />
+
+Then provide the translated chapter text (with <b>English</b> words in the body). The glossary must match the translations used in the text (consistency).
+{previous_vocab_instruction}
+
+Text length: {total_words} words. Preserve all HTML tags (e.g. <p>, <div>, <br>). Respond with ONLY the full HTML document (glossary + <hr /> + chapter). No markdown."""
 
 
 class OpenRouterTranslator:
@@ -123,26 +136,38 @@ class OpenRouterTranslator:
         target_words_count: int,
         ratio: float = 1.0,
         target_percent: float = 100.0,
+        previous_vocab: Optional[Dict[str, str]] = None,
     ) -> str:
         """
-        Process a full chapter HTML with Diglot Weave (non-blocking). Returns processed HTML only.
+        Process a full chapter HTML with Diglot Weave (non-blocking). Returns HTML with
+        glossary at top (Vocabulary for this Chapter) then <hr /> then translated body.
+        previous_vocab: Russian -> English from earlier chapters; use same translations and focus glossary on NEW words.
         """
         if target_words_count <= 0:
             return html
+
+        if previous_vocab and len(previous_vocab) > 0:
+            prev_list = " ".join(f"{ru}→{en}" for ru, en in list(previous_vocab.items())[:80])
+            previous_vocab_instruction = (
+                f"\n\nPREVIOUS CHAPTERS VOCABULARY (use these same English words when you see these Russian words): {prev_list}\n"
+                "In the glossary for THIS chapter, list mainly NEW words you translate here. You may add a short 'Review' subsection with a few words from the list above."
+            )
+        else:
+            previous_vocab_instruction = ""
 
         system = DIGLOT_SYSTEM_PROMPT.format(
             total_words=total_words,
             target_words_count=target_words_count,
             target_percent=int(round(target_percent)),
+            previous_vocab_instruction=previous_vocab_instruction,
         )
         if ratio < 0.30:
             system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."
 
         user = (
-            "Process the following HTML. Replace exactly "
-            f"{target_words_count} UNIQUE Russian words with English equivalents, scattered randomly. "
-            "Do not repeat the same Russian or English word. Wrap every English word in <b> tags. "
-            "Preserve all HTML structure. Reply with ONLY the processed HTML, nothing else.\n\n"
+            "Process the following HTML. Add a Chapter Vocabulary section at the top (see format in instructions), then <hr />, then the translated text. "
+            f"Replace approximately {target_words_count} UNIQUE Russian words with English (wrap in <b>). Use previous vocabulary when the same word appears. "
+            "Reply with ONLY the full HTML (glossary + <hr /> + chapter).\n\n"
             + html
         )
 

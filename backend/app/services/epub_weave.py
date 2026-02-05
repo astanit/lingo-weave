@@ -64,23 +64,56 @@ def count_chapter_words(html: str) -> int:
     return sum(1 for t in tokens if any(c.isalpha() for c in t))
 
 
+def extract_glossary_to_vocab(html: str, vocab: Dict[str, str]) -> None:
+    """
+    Parse 'Vocabulary for this Chapter' section and add Russian -> English to vocab.
+    Format: <h3>Vocabulary for this Chapter</h3><ul><li><b>English</b> — Russian</li>...
+    Updates vocab in place for global word tracking.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for h3 in soup.find_all("h3"):
+        if "vocabulary" not in (h3.get_text() or "").lower():
+            continue
+        ul = h3.find_next("ul")
+        if not ul:
+            continue
+        for li in ul.find_all("li"):
+            text = li.get_text() or ""
+            b = li.find("b")
+            en = (b.get_text() or "").strip() if b else ""
+            # Russian is after "—" or " - "
+            for sep in ("—", " – ", " - "):
+                if sep in text:
+                    ru = text.split(sep, 1)[-1].strip()
+                    if en and ru:
+                        vocab[ru] = en
+                    break
+        break
+
+
 async def _weave_chapter_async(
     html: str,
     ratio: float,
     translator: OpenRouterTranslator,
     options: WeaveOptions,
     target_percent: float,
+    previous_vocab: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Diglot Weave: word count before AI call; then non-blocking API.
-    target_percent is used in the prompt (e.g. 5, 50, 100).
+    previous_vocab: words from earlier chapters for consistency and glossary focus on NEW words.
     """
     total_words = count_chapter_words(html)
     target_words_count = max(0, int(round(total_words * ratio)))
     if target_words_count == 0:
         return html
     return await translator.diglot_weave_chapter(
-        html, total_words, target_words_count, ratio=ratio, target_percent=target_percent
+        html,
+        total_words,
+        target_words_count,
+        ratio=ratio,
+        target_percent=target_percent,
+        previous_vocab=previous_vocab or {},
     )
 
 
@@ -115,10 +148,10 @@ async def _process_single_chapter_async(
     total: int,
     translator: OpenRouterTranslator,
     options: WeaveOptions,
+    previous_vocab: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, str]:
     """
-    Process one chapter (non-blocking). Word count before AI call. Returns (item_id, html).
-    On ANY error, returns (item_id, original_html).
+    Process one chapter (non-blocking). Returns (item_id, html). Uses previous_vocab for consistency.
     """
     item_id = _get_item_id(item, idx)
     chapter_num = idx + 1
@@ -133,7 +166,12 @@ async def _process_single_chapter_async(
         target_percent = round(ratio * 100)
         print(f"Chapter {chapter_num}: Target percent set to {target_percent}%", flush=True)
         weaved = await _weave_chapter_async(
-            original, ratio, translator, options, target_percent=target_percent
+            original,
+            ratio,
+            translator,
+            options,
+            target_percent=target_percent,
+            previous_vocab=previous_vocab,
         )
         if weaved is None or not isinstance(weaved, str):
             weaved = original
@@ -172,31 +210,29 @@ async def _weave_epub_async(
 
     translator = OpenRouterTranslator()
     total = len(items)
-
-    sem = asyncio.Semaphore(30)
-
-    async def process_chapter_async(idx: int, item):
-        async with sem:
-            return await _process_single_chapter_async(
-                idx, item, total, translator, options
-            )
-
-    tasks = [process_chapter_async(idx, item) for idx, item in enumerate(items)]
-    results = await asyncio.gather(*tasks, return_exceptions=True)  # await all chapter tasks
-
-    # Match by ID: store translated content (string) by item_id
+    global_vocab: Dict[str, str] = {}  # Russian -> English across chapters
     translated_items: Dict[str, str] = {}
-    for i, r in enumerate(results):
-        item_id = _get_item_id(items[i], i)
-        if isinstance(r, Exception):
-            logger.warning("Chapter %s raised %s, keeping original", i + 1, r)
-            print(f"Chapter {i + 1}: Failed, using fallback", flush=True)
-            original_html = _get_item_html(items[i])
+
+    # Process chapters sequentially so each chapter gets previous vocabulary (glossary + consistency)
+    for idx, item in enumerate(items):
+        item_id = _get_item_id(item, idx)
+        try:
+            rid, html = await _process_single_chapter_async(
+                idx, item, total, translator, options, previous_vocab=global_vocab
+            )
+            if html is not None and isinstance(html, str):
+                translated_items[rid] = html
+                extract_glossary_to_vocab(html, global_vocab)
+                print(f"Chapter {idx + 1}: Success", flush=True)
+            else:
+                original_html = _get_item_html(item)
+                translated_items[item_id] = original_html if original_html is not None else ""
+                print(f"Chapter {idx + 1}: No result, using original", flush=True)
+        except Exception as e:
+            logger.warning("Chapter %s raised %s, keeping original", idx + 1, e)
+            print(f"Chapter {idx + 1}: Failed, using fallback", flush=True)
+            original_html = _get_item_html(item)
             translated_items[item_id] = original_html if original_html is not None else ""
-        else:
-            rid, html = r
-            translated_items[rid] = html if (html is not None and isinstance(html, str)) else _get_item_html(items[i]) or ""
-            print(f"Chapter {i + 1}: Success", flush=True)
 
     # Strict exclusion: never call set_content on toc, nav, ncx, style, image (leave original in object)
     EXCLUDED_SUBSTRINGS = ("toc", "nav", "ncx", "style", "image")
