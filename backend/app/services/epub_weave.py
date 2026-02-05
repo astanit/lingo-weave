@@ -234,6 +234,7 @@ async def _weave_epub_async(
     outputs_dir: str,
     options: WeaveOptions,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    model_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     options = options or WeaveOptions()
     out_root = Path(outputs_dir)
@@ -252,7 +253,7 @@ async def _weave_epub_async(
         if getattr(i, "get_type", lambda: ebooklib.ITEM_DOCUMENT)() == ebooklib.ITEM_DOCUMENT
     ]
 
-    translator = OpenRouterTranslator()
+    translator = OpenRouterTranslator(model=model_id)
     total = len(items)
     global_vocab: Dict[str, str] = {}  # Russian -> English across chapters
     already_glossaried: Set[str] = set()  # English words already in previous glossaries (smart glossary memory)
@@ -347,6 +348,7 @@ async def run_weave_epub_async(
     outputs_dir: str,
     options: WeaveOptions | None = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    model_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Async entry point for EPUB weave with optional progress (e.g. for Telegram bot)."""
     options = options or WeaveOptions()
@@ -355,4 +357,5 @@ async def run_weave_epub_async(
         outputs_dir=outputs_dir,
         options=options,
         progress_callback=progress_callback,
+        model_id=model_id,
     )

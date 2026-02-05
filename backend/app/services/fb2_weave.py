@@ -151,6 +151,7 @@ async def run_weave_fb2_async(
     outputs_dir: str,
     options: Optional[WeaveOptions] = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    model_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Async entry point for FB2 weave with optional progress (e.g. for Telegram bot)."""
     options = options or WeaveOptions()
@@ -171,7 +172,7 @@ async def run_weave_fb2_async(
         return job_id, output_path
 
     segments = _segment_by_char_count(items)
-    translator = OpenRouterTranslator()
+    translator = OpenRouterTranslator(model=model_id)
     global_vocab: Dict[str, str] = {}
     already_glossaried: Set[str] = set()
     total = len(segments)

@@ -29,7 +29,7 @@ ASSEMBLY: Output must be [GLOSSARY] + <hr /> + [TRANSLATED TEXT]. Preserve all H
 
 
 class OpenRouterTranslator:
-    def __init__(self) -> None:
+    def __init__(self, model: Optional[str] = None) -> None:
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             raise RuntimeError(
@@ -44,7 +44,7 @@ class OpenRouterTranslator:
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
         )
-        self.model = os.getenv("OPENROUTER_MODEL", "google/gemini-flash-1.5")
+        self.model = model or os.getenv("OPENROUTER_MODEL", "google/gemini-flash-1.5")
 
     def translate_words_ru_to_en(self, words: List[str]) -> Dict[str, str]:
         """
