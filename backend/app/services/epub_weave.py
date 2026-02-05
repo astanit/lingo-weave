@@ -5,7 +5,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import ebooklib
 from bs4 import BeautifulSoup
@@ -64,15 +64,16 @@ def count_chapter_words(html: str) -> int:
     return sum(1 for t in tokens if any(c.isalpha() for c in t))
 
 
-def extract_glossary_to_vocab(html: str, vocab: Dict[str, str]) -> None:
+def extract_glossary_to_vocab(
+    html: str, vocab: Dict[str, str], already_glossaried: Optional[Set[str]] = None
+) -> None:
     """
-    Parse 'Vocabulary for this Chapter' section and add Russian -> English to vocab.
-    Format: <h3>Vocabulary for this Chapter</h3><ul><li><b>English</b> — Russian</li>...
-    Updates vocab in place for global word tracking.
+    Parse 'Chapter Vocabulary' section: add Russian -> English to vocab; add English to already_glossaried for memory.
+    Format: <h3>Chapter Vocabulary</h3> or <h3>Vocabulary for this Chapter</h3><ul><li><b>English</b> — Russian</li>...
     """
     soup = BeautifulSoup(html, "html.parser")
     for h3 in soup.find_all("h3"):
-        if "vocabulary" not in (h3.get_text() or "").lower():
+        if "vocabulary" not in (h3.get_text() or "").lower() and "chapter" not in (h3.get_text() or "").lower():
             continue
         ul = h3.find_next("ul")
         if not ul:
@@ -81,12 +82,13 @@ def extract_glossary_to_vocab(html: str, vocab: Dict[str, str]) -> None:
             text = li.get_text() or ""
             b = li.find("b")
             en = (b.get_text() or "").strip() if b else ""
-            # Russian is after "—" or " - "
             for sep in ("—", " – ", " - "):
                 if sep in text:
                     ru = text.split(sep, 1)[-1].strip()
                     if en and ru:
                         vocab[ru] = en
+                        if already_glossaried is not None:
+                            already_glossaried.add(en.lower())
                     break
         break
 
@@ -98,10 +100,11 @@ async def _weave_chapter_async(
     options: WeaveOptions,
     target_percent: float,
     previous_vocab: Optional[Dict[str, str]] = None,
+    already_glossaried: Optional[Set[str]] = None,
 ) -> str:
     """
     Diglot Weave: word count before AI call; then non-blocking API.
-    previous_vocab: words from earlier chapters for consistency and glossary focus on NEW words.
+    already_glossaried: English words from previous glossaries so this chapter's glossary stays "New Words" only.
     """
     total_words = count_chapter_words(html)
     target_words_count = max(0, int(round(total_words * ratio)))
@@ -114,6 +117,7 @@ async def _weave_chapter_async(
         ratio=ratio,
         target_percent=target_percent,
         previous_vocab=previous_vocab or {},
+        already_glossaried=already_glossaried,
     )
 
 
@@ -149,6 +153,7 @@ async def _process_single_chapter_async(
     translator: OpenRouterTranslator,
     options: WeaveOptions,
     previous_vocab: Optional[Dict[str, str]] = None,
+    already_glossaried: Optional[Set[str]] = None,
 ) -> Tuple[str, str]:
     """
     Process one chapter (non-blocking). Returns (item_id, html). Uses previous_vocab for consistency.
@@ -172,6 +177,7 @@ async def _process_single_chapter_async(
             options,
             target_percent=target_percent,
             previous_vocab=previous_vocab,
+            already_glossaried=already_glossaried,
         )
         if weaved is None or not isinstance(weaved, str):
             weaved = original
@@ -211,18 +217,25 @@ async def _weave_epub_async(
     translator = OpenRouterTranslator()
     total = len(items)
     global_vocab: Dict[str, str] = {}  # Russian -> English across chapters
+    already_glossaried: Set[str] = set()  # English words already in previous glossaries (smart glossary memory)
     translated_items: Dict[str, str] = {}
 
-    # Process chapters sequentially so each chapter gets previous vocabulary (glossary + consistency)
+    # Process chapters sequentially: each gets previous vocab + already_glossaried so glossary = "New Words" only
     for idx, item in enumerate(items):
         item_id = _get_item_id(item, idx)
         try:
             rid, html = await _process_single_chapter_async(
-                idx, item, total, translator, options, previous_vocab=global_vocab
+                idx,
+                item,
+                total,
+                translator,
+                options,
+                previous_vocab=global_vocab,
+                already_glossaried=already_glossaried,
             )
             if html is not None and isinstance(html, str):
                 translated_items[rid] = html
-                extract_glossary_to_vocab(html, global_vocab)
+                extract_glossary_to_vocab(html, global_vocab, already_glossaried=already_glossaried)
                 print(f"Chapter {idx + 1}: Success", flush=True)
             else:
                 original_html = _get_item_html(item)

@@ -5,33 +5,27 @@ from typing import Dict, Iterable, List, Optional
 
 from openai import AsyncOpenAI, OpenAI
 
-DIGLOT_SYSTEM_PROMPT = """You are a Diglot Weave generator.
-For this segment, your target is {target_percent}% English words.
+DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher.
 
-Rules:
-1. Replace approximately {target_words_count} words.
-2. DISTRIBUTION: Scatter words RANDOMLY. Do not translate only the beginning of sentences.
-3. FILTERS: Never translate names (Урсула, Амалия, etc.) or places.
-4. TYPES: Focus on common nouns, verbs, and adjectives.
-5. FORMAT: Wrap every English word in <b>tags</b>. Example: <b>carriage</b>.
-6. NO REPETITION: Use unique words for translation within this segment.
+1. Translate the text according to the target percentage ({target_percent}%).
+2. Create a 'New Vocabulary' list for the start of this chapter.
+   - Select 10-15 most sophisticated or important English words from your translation. Do NOT include every translated word.
+   - FILTERING: Skip very simple words (e.g. house, man, go, good, big) in the glossary even if they appear in the text. Focus on difficult, rare, or meaning-heavy words.
+   - Format: <h3>Chapter Vocabulary</h3><ul><li><b>word</b> — перевод</li>...</ul><hr/>
+   - CRITICAL: Focus on interesting verbs and adjectives. Skip basic nouns if the list is too long.
+   - UNIQUENESS: Do not include words that have already appeared in glossaries of previous chapters. Every glossary should feel like a "New Words" list.
+   - If no suitable words (e.g. chapter too short), you may omit the glossary or use fewer items.
+3. Ensure the glossary words match exactly how they are used in the text.
 
-OUTPUT FORMAT (strict):
-Before the translated chapter text, generate a "Chapter Vocabulary" section.
-- Include ONLY unique words that you actually translated in this segment. If you translated no words, omit the glossary.
-- Format exactly as follows (use standard HTML so it looks good in any EPUB reader):
-
-<h3>Vocabulary for this Chapter</h3>
-<ul>
-<li><b>English Word</b> — Russian Translation</li>
-<li><b>another</b> — другой</li>
-</ul>
-<hr />
-
-Then provide the translated chapter text (with <b>English</b> words in the body). The glossary must match the translations used in the text (consistency).
+Rules for translation:
+- DISTRIBUTION: Scatter words RANDOMLY. Do not translate only the beginning of sentences.
+- FILTERS: Never translate names (Урсула, Амалия, etc.) or places.
+- FORMAT: Wrap every English word in the body in <b>tags</b>. Example: <b>carriage</b>.
+- Replace approximately {target_words_count} words. Text length: {total_words} words.
 {previous_vocab_instruction}
+{already_glossaried_instruction}
 
-Text length: {total_words} words. Preserve all HTML tags (e.g. <p>, <div>, <br>). Respond with ONLY the full HTML document (glossary + <hr /> + chapter). No markdown."""
+ASSEMBLY: Output must be [GLOSSARY] + <hr /> + [TRANSLATED TEXT]. Preserve all HTML (e.g. <p>, <div>, <br>). Respond with ONLY the full HTML. No markdown."""
 
 
 class OpenRouterTranslator:
@@ -137,11 +131,11 @@ class OpenRouterTranslator:
         ratio: float = 1.0,
         target_percent: float = 100.0,
         previous_vocab: Optional[Dict[str, str]] = None,
+        already_glossaried: Optional[set] = None,
     ) -> str:
         """
-        Process a full chapter HTML with Diglot Weave (non-blocking). Returns HTML with
-        glossary at top (Vocabulary for this Chapter) then <hr /> then translated body.
-        previous_vocab: Russian -> English from earlier chapters; use same translations and focus glossary on NEW words.
+        Process a full chapter HTML with Diglot Weave (non-blocking). Returns HTML:
+        [GLOSSARY] + <hr /> + [TRANSLATED TEXT]. Smart glossary: 10-15 sophisticated words only; no repeats from previous chapters.
         """
         if target_words_count <= 0:
             return html
@@ -149,24 +143,35 @@ class OpenRouterTranslator:
         if previous_vocab and len(previous_vocab) > 0:
             prev_list = " ".join(f"{ru}→{en}" for ru, en in list(previous_vocab.items())[:80])
             previous_vocab_instruction = (
-                f"\n\nPREVIOUS CHAPTERS VOCABULARY (use these same English words when you see these Russian words): {prev_list}\n"
-                "In the glossary for THIS chapter, list mainly NEW words you translate here. You may add a short 'Review' subsection with a few words from the list above."
+                f"\n\nPREVIOUS CHAPTERS VOCABULARY (use these same English words when you see these Russian words): {prev_list}"
             )
         else:
             previous_vocab_instruction = ""
+
+        if already_glossaried and len(already_glossaried) > 0:
+            already_list = ", ".join(sorted(already_glossaried)[:100])
+            already_glossaried_instruction = (
+                f"\n\nDo NOT include these words in this chapter's glossary (already in previous chapters): {already_list}. "
+                "Every glossary should be a 'New Words' list only."
+            )
+        else:
+            already_glossaried_instruction = (
+                "\n\nTry to pick words that are unique to this specific context and haven't likely been featured in basic introductory vocabulary."
+            )
 
         system = DIGLOT_SYSTEM_PROMPT.format(
             total_words=total_words,
             target_words_count=target_words_count,
             target_percent=int(round(target_percent)),
             previous_vocab_instruction=previous_vocab_instruction,
+            already_glossaried_instruction=already_glossaried_instruction,
         )
         if ratio < 0.30:
             system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."
 
         user = (
-            "Process the following HTML. Add a Chapter Vocabulary section at the top (see format in instructions), then <hr />, then the translated text. "
-            f"Replace approximately {target_words_count} UNIQUE Russian words with English (wrap in <b>). Use previous vocabulary when the same word appears. "
+            "Process the following HTML. Add a 'Chapter Vocabulary' (10-15 sophisticated words only, format in instructions), then <hr />, then the translated text. "
+            f"Replace approximately {target_words_count} words with English (wrap in <b>). Skip simple words in the glossary. "
             "Reply with ONLY the full HTML (glossary + <hr /> + chapter).\n\n"
             + html
         )
