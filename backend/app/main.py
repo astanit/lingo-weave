@@ -20,15 +20,12 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="LingoWeave API")
 
-# CORS: allow all origins so frontend (e.g. https://lingo-weave-production.up.railway.app) can call the API.
-# allow_credentials must be False when allow_origins is ["*"] (browser requirement).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["*"],  # Разрешить всем
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 # Very simple in-memory job state (sufficient for MVP / single instance)
@@ -111,4 +108,10 @@ async def config():
             "model": "google/gemini-flash-1.5-8b",
         }
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port)
 
