@@ -247,55 +247,50 @@ async def _weave_epub_async(
     tasks = [process_chapter_async(idx, item) for idx, item in enumerate(items)]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Match by ID: store translated content (string) by item_id to avoid index mismatch
-    results_by_id: Dict[str, str] = {}
+    # Match by ID: store translated content (string) by item_id
+    translated_items: Dict[str, str] = {}
     for i, r in enumerate(results):
         item_id = _get_item_id(items[i], i)
         if isinstance(r, Exception):
             logger.warning("Chapter %s raised %s, keeping original", i + 1, r)
             print(f"Chapter {i + 1}: Failed, using fallback", flush=True)
             original_html = _get_item_html(items[i])
-            results_by_id[item_id] = original_html if original_html is not None else ""
+            translated_items[item_id] = original_html if original_html is not None else ""
         else:
             rid, html = r
-            results_by_id[rid] = html if (html is not None and isinstance(html, str)) else _get_item_html(items[i]) or ""
+            translated_items[rid] = html if (html is not None and isinstance(html, str)) else _get_item_html(items[i]) or ""
             print(f"Chapter {i + 1}: Success", flush=True)
 
-    # Final assembly: apply results by item ID with strict None-safety
+    # Final assembly: apply results by item ID. Exclude TOC/nav/ncx — always use original.
     for idx, item in enumerate(items):
         item_id = _get_item_id(item, idx)
         original_content = item.get_content()
-        # Only call set_content on items that have content (skip empty/None)
-        if original_content is None:
-            print(f"Skipping item {item_id}: get_content() was None", flush=True)
-            continue
-        if isinstance(original_content, bytes) and len(original_content) == 0:
-            print(f"Skipping item {item_id}: get_content() was empty bytes", flush=True)
-            continue
 
-        translated_content = results_by_id.get(item_id)
-        # Global Content Guard: never pass None to set_content
-        if translated_content is None:
-            print(
-                f"WARNING: Item {item_id} has None content. Reverting to original.",
-                flush=True,
-            )
-            translated_content = original_content
-
-        # Strict type conversion: ensure bytes for set_content
-        if isinstance(translated_content, str):
-            content_bytes = translated_content.encode("utf-8")
-        elif translated_content is not None:
-            content_bytes = (
-                translated_content
-                if isinstance(translated_content, bytes)
-                else str(translated_content).encode("utf-8")
-            )
+        # Exclude TOC and Navigation: never translate items whose ID contains toc, nav, or ncx
+        id_lower = item_id.lower()
+        if "toc" in id_lower or "nav" in id_lower or "ncx" in id_lower:
+            # Always use original content for TOC/nav/ncx
+            new_content = original_content
         else:
-            content_bytes = original_content if isinstance(original_content, bytes) else b""
+            # Try to get translated version from our dictionary
+            translated_version = translated_items.get(item_id)
+            if translated_version is not None:
+                new_content = translated_version
+            else:
+                new_content = original_content
+
+        # Final safety check: if for some reason new_content is still None, use empty bytes
+        if new_content is None:
+            new_content = b""
+
+        # Ensure it is bytes (ebooklib set_content expects bytes)
+        if isinstance(new_content, str):
+            new_content = new_content.encode("utf-8")
+        elif not isinstance(new_content, bytes):
+            new_content = b""
 
         print(f"Assembling item: [{item_id}]", flush=True)
-        item.set_content(content_bytes)
+        item.set_content(new_content)
 
     output_path = str(out_dir / "lingoweave.epub")
     epub.write_epub(output_path, book)
