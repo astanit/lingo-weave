@@ -4,6 +4,7 @@ Telegram bot for LingoWeave: document upload -> payment (or admin skip) -> trans
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -56,16 +57,28 @@ STARS_CURRENCY = "XTR"
 # Max file size: 20 MB
 FILE_SIZE_LIMIT_BYTES = 20 * 1024 * 1024
 
-# Tier: (model_id, amount in Stars) — 4 options
-# Standard (100): Gemini 2.0 Flash, GPT-4o Mini
-# Premium (500–700): GPT-4o, Claude 3.5 Sonnet
+# Tier: (model_id,) — amount is computed from word_count via calculate_price
+# Standard: 2 Stars per 1000 words (min 50). Premium: 10 Stars per 1000 words (min 50).
 TIERS = {
-    "gemini": ("google/gemini-2.0-flash-001", 100),
-    "gpt4omini": ("openai/gpt-4o-mini", 100),
-    "gpt4o": ("openai/gpt-4o", 500),
-    "claude": ("anthropic/claude-3.5-sonnet", 700),
+    "gemini": ("google/gemini-2.0-flash-001",),
+    "gpt4omini": ("openai/gpt-4o-mini",),
+    "gpt4o": ("openai/gpt-4o",),
+    "claude": ("anthropic/claude-3.5-sonnet",),
 }
+STARS_PER_1K_STANDARD = 2
+STARS_PER_1K_PREMIUM = 10
+MIN_STARS = 50
 FALLBACK_MODEL = "openai/gpt-4o-mini"
+
+
+def calculate_price(word_count: int, model_tier: str) -> int:
+    """Price in Telegram Stars. Base unit 1000 words. Standard (Gemini/Mini): 2/1k; Premium (GPT-4o/Claude): 10/1k. Min 50 Stars."""
+    if word_count <= 0:
+        word_count = 25000
+    units = max(1, (word_count + 999) // 1000)
+    if model_tier in ("gemini", "gpt4omini"):
+        return max(MIN_STARS, units * STARS_PER_1K_STANDARD)
+    return max(MIN_STARS, units * STARS_PER_1K_PREMIUM)
 
 # Pending model choice: choice_id -> { "file_id", "chat_id", "user_id", "file_name", "is_admin" }
 _pending_choice: Dict[str, Dict[str, Any]] = {}
@@ -97,6 +110,45 @@ def _get_extension(filename: Optional[str]) -> str:
         if lower.endswith(ext):
             return ext
     return ""
+
+
+def _count_words_in_text(text: str) -> int:
+    """Count words (sequences of letters/numbers)."""
+    return len(re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text))
+
+
+def _count_words_in_file(input_path: str, ext: str) -> int:
+    """Extract text from file and return total word count."""
+    try:
+        if ext == ".txt":
+            with open(input_path, "r", encoding="utf-8", errors="replace") as f:
+                return _count_words_in_text(f.read())
+        if ext == ".epub":
+            book = epub.read_epub(input_path)
+            parts = []
+            for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+                if not isinstance(item, epub.EpubHtml):
+                    continue
+                raw = item.get_content()
+                if raw:
+                    try:
+                        parts.append(raw.decode("utf-8", errors="replace"))
+                    except Exception:
+                        pass
+            return _count_words_in_text(re.sub(r"<[^>]+>", " ", " ".join(parts)))
+        if ext == ".fb2":
+            parser = etree.XMLParser(recover=True)
+            tree = etree.parse(input_path, parser)
+            root = tree.getroot()
+            ns = "http://www.gribuser.ru/xml/fictionbook/2.0"
+            parts = []
+            for p in root.iter(f"{{{ns}}}p"):
+                text = (p.text or "") + "".join((e.text or "") + (e.tail or "") for e in p)
+                parts.append(text)
+            return _count_words_in_text(" ".join(parts))
+    except Exception as e:
+        logger.exception("Word count failed: %s", e)
+    return 0
 
 
 def _create_sample_file(input_path: str, ext: str) -> Optional[Path]:
@@ -167,7 +219,8 @@ async def _run_trial_then_upsell(
     file_name: str,
     user_id: int,
 ):
-    """Create sample, translate with Gemini, send snippet, then show 4-model upsell."""
+    """Create sample, translate with Gemini, send snippet, then show 4-model upsell with dynamic pricing."""
+    word_count = _count_words_in_file(str(full_path), ext)
     sample_path = _create_sample_file(str(full_path), ext)
     if not sample_path or not sample_path.exists():
         await bot.send_message(chat_id, "Не удалось подготовить пробный фрагмент. Отправьте файл ещё раз или выберите модель ниже.")
@@ -178,12 +231,10 @@ async def _run_trial_then_upsell(
             "user_id": user_id,
             "file_name": file_name,
             "is_admin": False,
+            "word_count": word_count,
         }
-        await bot.send_message(
-            chat_id,
-            "Чтобы перевести всю книгу целиком, выберите качество:",
-            reply_markup=_model_choice_keyboard(choice_id),
-        )
+        msg = f"В вашей книге {word_count} слов. Выберите модель для полного перевода:" if word_count > 0 else "Чтобы перевести всю книгу целиком, выберите качество:"
+        await bot.send_message(chat_id, msg, reply_markup=_model_choice_keyboard(choice_id, word_count or 0))
         return
     sample_ext = sample_path.suffix.lower()
     if sample_ext not in ALLOWED_EXTENSIONS:
@@ -204,17 +255,20 @@ async def _run_trial_then_upsell(
             result_filename = "SAMPLE_LingoWeave" + (".txt" if sample_ext == ".txt" else ext)
             doc = FSInputFile(output_path, filename=result_filename)
             await bot.send_document(chat_id, doc)
-    await bot.send_message(
-        chat_id,
-        "👆 Это пример перевода вашей книги. Чтобы перевести всю книгу целиком, выберите качество:" if result else "Чтобы перевести всю книгу целиком, выберите качество:",
-        reply_markup=_model_choice_keyboard(choice_id),
+    upsell_msg = (
+        f"В вашей книге {word_count} слов. Выберите модель для полного перевода:"
+        if word_count > 0 else "Выберите модель для полного перевода:"
     )
+    if result:
+        upsell_msg = "👆 Это пример перевода вашей книги. " + upsell_msg
+    await bot.send_message(chat_id, upsell_msg, reply_markup=_model_choice_keyboard(choice_id, word_count))
     _pending_choice[choice_id] = {
         "file_id": file_id,
         "chat_id": chat_id,
         "user_id": user_id,
         "file_name": file_name,
         "is_admin": False,
+        "word_count": word_count,
     }
     try:
         os.remove(full_path)
@@ -484,12 +538,23 @@ async def _do_translation_flow(
         _active_translations = max(0, _active_translations - 1)
 
 
-def _model_choice_keyboard(choice_id: str) -> InlineKeyboardMarkup:
+def _model_choice_keyboard(choice_id: str, word_count: Optional[int] = None) -> InlineKeyboardMarkup:
+    """word_count=None for admin (0 звёзд); else show dynamic prices per 1k words."""
+    if word_count is None:
+        stars = "0 звёзд"
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ Gemini 2.0 Flash (Fastest) — " + stars, callback_data=f"tier:{choice_id}:gemini")],
+            [InlineKeyboardButton(text="🍏 GPT-4o Mini (Balanced) — " + stars, callback_data=f"tier:{choice_id}:gpt4omini")],
+            [InlineKeyboardButton(text="🤖 GPT-4o (Powerful) — " + stars, callback_data=f"tier:{choice_id}:gpt4o")],
+            [InlineKeyboardButton(text="💎 Claude 3.5 Sonnet (ULTRA PREMIUM) — " + stars, callback_data=f"tier:{choice_id}:claude")],
+        ])
+    price_std = calculate_price(word_count, "gemini")
+    price_premium = calculate_price(word_count, "gpt4o")
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ Gemini 2.0 Flash (Fastest) — 100 звёзд", callback_data=f"tier:{choice_id}:gemini")],
-        [InlineKeyboardButton(text="🍏 GPT-4o Mini (Balanced) — 100 звёзд", callback_data=f"tier:{choice_id}:gpt4omini")],
-        [InlineKeyboardButton(text="🤖 GPT-4o (Powerful) — 500 звёзд", callback_data=f"tier:{choice_id}:gpt4o")],
-        [InlineKeyboardButton(text="💎 Claude 3.5 Sonnet (ULTRA PREMIUM) — 700 звёзд", callback_data=f"tier:{choice_id}:claude")],
+        [InlineKeyboardButton(text=f"⚡ Gemini 2.0 Flash (Fastest): {price_std} ⭐", callback_data=f"tier:{choice_id}:gemini")],
+        [InlineKeyboardButton(text=f"🍏 GPT-4o Mini (Balanced): {price_std} ⭐", callback_data=f"tier:{choice_id}:gpt4omini")],
+        [InlineKeyboardButton(text=f"🤖 GPT-4o (Powerful): {price_premium} ⭐", callback_data=f"tier:{choice_id}:gpt4o")],
+        [InlineKeyboardButton(text=f"💎 Claude 3.5 Sonnet (ULTRA PREMIUM): {price_premium} ⭐", callback_data=f"tier:{choice_id}:claude")],
     ])
 
 
@@ -532,8 +597,8 @@ async def on_document(message: Message, bot: Bot):
         }
         await message.answer("Привет, админ! Выбери модель — оплата не требуется.")
         await message.answer(
-            "Выберите качество перевода:",
-            reply_markup=_model_choice_keyboard(choice_id),
+            "Выберите качество перевода (для вас бесплатно):",
+            reply_markup=_model_choice_keyboard(choice_id, word_count=None),
         )
         return
 
@@ -567,7 +632,8 @@ async def on_model_choice(callback: CallbackQuery, bot: Bot):
         await callback.answer("Сессия истекла. Отправьте файл заново.", show_alert=True)
         return
 
-    model_id, amount = TIERS[tier]
+    model_id = TIERS[tier][0]
+    amount = 0 if data["is_admin"] else calculate_price(data.get("word_count") or 0, tier)
     chat_id = data["chat_id"]
     file_id = data["file_id"]
     file_name = data["file_name"]
