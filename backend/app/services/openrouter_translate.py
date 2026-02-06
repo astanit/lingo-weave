@@ -197,6 +197,41 @@ class OpenRouterTranslator:
             mapping.update(self.translate_words_ru_to_en(buf))
         return mapping
 
+    TRIAL_SYSTEM_PROMPT = (
+        "Translate exactly 10% of this short fragment into English. "
+        "Bold English words: <b>word</b>. Keep Cyrillic names. Focus on common nouns. "
+        "Return the full fragment with about 10% of words translated and wrapped in <b>. "
+        "Preserve all original structure and line breaks. No glossary. Output only the translated fragment."
+    )
+
+    async def translate_trial_fragment(
+        self, text: str, model_id: Optional[str] = None
+    ) -> str:
+        """Translate a short trial snippet with fixed 10% target. Returns translated text or original on failure."""
+        if not (text or text.strip()):
+            return text or ""
+        model = model_id or self.model
+        try:
+            print(f"DEBUG: Using model slug '{model}' for trial fragment")
+            resp = await self.async_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": self.TRIAL_SYSTEM_PROMPT},
+                    {"role": "user", "content": text.strip()},
+                ],
+                temperature=0.3,
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            if not content:
+                return text
+            if content.startswith("```"):
+                content = re.sub(r"^```(?:html)?\s*", "", content)
+                content = re.sub(r"\s*```$", "", content)
+            return content.strip()
+        except Exception as e:
+            logger.warning("Trial fragment translation failed: %s", e)
+            return text
+
     async def _call_chapter_once(
         self, model_id: str, system: str, user: str
     ) -> Optional[str]:

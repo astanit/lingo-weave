@@ -239,27 +239,54 @@ async def _run_trial_then_upsell(
     sample_ext = sample_path.suffix.lower()
     if sample_ext not in ALLOWED_EXTENSIONS:
         sample_ext = ".txt"
-    result = await _run_translation(
-        str(sample_path), sample_ext, None, chat_id, bot, model_id=TRIAL_MODEL
-    )
+    # Read sample as UTF-8 for AI (TXT/FB2 sample is .txt; EPUB sample is .epub — extract first chapter text)
+    sample_content = ""
+    try:
+        if sample_path.suffix.lower() == ".txt":
+            sample_content = sample_path.read_text(encoding="utf-8", errors="replace")
+        else:
+            book = epub.read_epub(str(sample_path))
+            for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+                if isinstance(item, epub.EpubHtml):
+                    raw = item.get_content()
+                    if raw:
+                        sample_content = raw.decode("utf-8", errors="replace")
+                        break
+    except Exception as e:
+        logger.warning("Trial sample read failed: %s", e)
     try:
         os.remove(sample_path)
     except OSError:
         pass
     choice_id = uuid.uuid4().hex
-    if not result:
-        await bot.send_message(chat_id, "Пробный фрагмент не удалось перевести. Выберите модель для полной книги:")
+    target_words_count = max(1, _count_words_in_text(sample_content) * 10 // 100)
+    print(f"DEBUG: Processing trial snippet for user {user_id}. Target words: {target_words_count}")
+    translated = ""
+    if sample_content.strip():
+        from app.services.openrouter_translate import OpenRouterTranslator
+        translator = OpenRouterTranslator(model=TRIAL_MODEL)
+        translated = await translator.translate_trial_fragment(sample_content, model_id=TRIAL_MODEL)
+    if not translated or not translated.strip() or translated.strip() == sample_content.strip():
+        await bot.send_message(
+            chat_id,
+            "⚠️ Не удалось создать перевод фрагмента, но вы можете заказать полный перевод ниже.",
+        )
     else:
-        output_path, _, _ = result
-        if output_path and os.path.exists(output_path):
-            result_filename = "SAMPLE_LingoWeave" + (".txt" if sample_ext == ".txt" else ext)
-            doc = FSInputFile(output_path, filename=result_filename)
+        out_path = UPLOADS_DIR / f"trial_out_{uuid.uuid4().hex}.txt"
+        out_path.write_text(translated, encoding="utf-8")
+        try:
+            doc = FSInputFile(out_path, filename="SAMPLE_LingoWeave.txt")
             await bot.send_document(chat_id, doc)
+        finally:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
     upsell_msg = (
         f"В вашей книге {word_count} слов. Выберите модель для полного перевода:"
         if word_count > 0 else "Выберите модель для полного перевода:"
     )
-    if result:
+    if translated and translated.strip() and translated.strip() != sample_content.strip():
         upsell_msg = "👆 Это пример перевода вашей книги. " + upsell_msg
     await bot.send_message(chat_id, upsell_msg, reply_markup=_model_choice_keyboard(choice_id, word_count))
     _pending_choice[choice_id] = {
