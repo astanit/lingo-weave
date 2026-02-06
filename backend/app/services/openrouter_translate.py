@@ -41,6 +41,13 @@ def _is_retryable_error(exc: Exception) -> bool:
     return False
 
 
+def _output_length_ok(original_html: str, result_content: str) -> bool:
+    """True if result is at least MIN_OUTPUT_LENGTH_RATIO of original length (avoid empty/summary chapters)."""
+    if not original_html or not result_content:
+        return False
+    return len(result_content) >= MIN_OUTPUT_LENGTH_RATIO * len(original_html)
+
+
 def _is_model_not_found_error(exc: Exception) -> bool:
     """True if API returned 404 or 'Model not found' (for sync fallback)."""
     msg = str(exc).lower()
@@ -52,6 +59,8 @@ def _is_model_not_found_error(exc: Exception) -> bool:
         return True
     return False
 
+
+MIN_OUTPUT_LENGTH_RATIO = 0.8  # Reject if AI returns less than 80% of original length
 
 DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher.
 
@@ -67,9 +76,10 @@ DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher.
 
 Rules for translation:
 - DISTRIBUTION: Scatter words RANDOMLY. Do not translate only the beginning of sentences.
-- FILTERS: Never translate names (Урсула, Амалия, etc.) or places.
+- PROPER NOUNS: NEVER translate, transliterate, or change the script of Russian proper names, cities, or places. Keep all Russian names and locations in their original Cyrillic form. Do not touch them. Examples: "Амалия" must remain "Амалия" (NOT "Amalia"); "Джулиан" must remain "Джулиан".
 - FORMAT: Wrap every English word in the body in <b>tags</b>. Example: <b>carriage</b>.
 - Replace approximately {target_words_count} words. Text length: {total_words} words.
+- FULL TEXT ONLY: You MUST return the ENTIRE text with English words woven in. It is forbidden to skip sentences, paragraphs, or return a summary. Every sentence from the original must appear in your output.
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
@@ -268,11 +278,22 @@ class OpenRouterTranslator:
             + html
         )
 
+        def _valid_out(out: Optional[str]) -> bool:
+            if not out:
+                return False
+            if not _output_length_ok(html, out):
+                logger.warning(
+                    "Chapter output too short (<%s%% of original length), retrying or using fallback",
+                    int(MIN_OUTPUT_LENGTH_RATIO * 100),
+                )
+                return False
+            return True
+
         # Tier 1: selected model, 3 attempts, 5s delay
         for attempt in range(TIER1_ATTEMPTS):
             try:
                 out = await self._call_chapter_once(self.model, system, user)
-                if out:
+                if _valid_out(out):
                     return out
             except Exception as e:
                 if not _is_retryable_error(e):
@@ -281,22 +302,22 @@ class OpenRouterTranslator:
             if attempt < TIER1_ATTEMPTS - 1:
                 await asyncio.sleep(TIER1_DELAY_SEC)
 
-        # Tier 2: gpt-4o-mini, 2 attempts
+        # Tier 2: gpt-4o-mini (first fallback), 2 attempts
         for attempt in range(TIER2_ATTEMPTS):
             try:
                 out = await self._call_chapter_once(TIER2_MODEL, system, user)
-                if out:
+                if _valid_out(out):
                     return out
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
                 logger.debug("Tier 2 attempt %s: %s", attempt + 1, e)
 
-        # Tier 3: gemini-2.0-flash, 2 attempts
+        # Tier 3: gemini-2.0-flash (second fallback), 2 attempts
         for attempt in range(TIER3_ATTEMPTS):
             try:
                 out = await self._call_chapter_once(TIER3_MODEL, system, user)
-                if out:
+                if _valid_out(out):
                     return out
             except Exception as e:
                 if not _is_retryable_error(e):

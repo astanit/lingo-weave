@@ -46,13 +46,12 @@ STARS_CURRENCY = "XTR"
 # Max file size: 20 MB
 FILE_SIZE_LIMIT_BYTES = 20 * 1024 * 1024
 
-# Tier: (model_id, amount in Stars) — 5 options per OpenRouter
-# Standard (100–150): DeepSeek, Gemini Flash, GPT-4o Mini
+# Tier: (model_id, amount in Stars) — 4 options
+# Standard (100): Gemini 2.0 Flash, GPT-4o Mini
 # Premium (500–700): GPT-4o, Claude 3.5 Sonnet
 TIERS = {
-    "deepseek": ("deepseek/deepseek-chat", 100),
-    "gemini": ("google/gemini-2.0-flash-001", 150),
-    "gpt4omini": ("openai/gpt-4o-mini", 150),
+    "gemini": ("google/gemini-2.0-flash-001", 100),
+    "gpt4omini": ("openai/gpt-4o-mini", 100),
     "gpt4o": ("openai/gpt-4o", 500),
     "claude": ("anthropic/claude-3.5-sonnet", 700),
 }
@@ -354,9 +353,8 @@ async def _do_translation_flow(
 
 def _model_choice_keyboard(choice_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🇨🇳 DeepSeek V3 (Smart & Cheap) — 100 звёзд", callback_data=f"tier:{choice_id}:deepseek")],
-        [InlineKeyboardButton(text="⚡ Gemini 2.0 Flash (Fastest) — 150 звёзд", callback_data=f"tier:{choice_id}:gemini")],
-        [InlineKeyboardButton(text="🍏 GPT-4o Mini (Balanced) — 150 звёзд", callback_data=f"tier:{choice_id}:gpt4omini")],
+        [InlineKeyboardButton(text="⚡ Gemini 2.0 Flash (Fastest) — 100 звёзд", callback_data=f"tier:{choice_id}:gemini")],
+        [InlineKeyboardButton(text="🍏 GPT-4o Mini (Balanced) — 100 звёзд", callback_data=f"tier:{choice_id}:gpt4omini")],
         [InlineKeyboardButton(text="🤖 GPT-4o (Powerful) — 500 звёзд", callback_data=f"tier:{choice_id}:gpt4o")],
         [InlineKeyboardButton(text="💎 Claude 3.5 Sonnet (ULTRA PREMIUM) — 700 звёзд", callback_data=f"tier:{choice_id}:claude")],
     ])
