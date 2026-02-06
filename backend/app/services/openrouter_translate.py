@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from openai import AsyncOpenAI, OpenAI
 
@@ -48,6 +48,74 @@ def _output_length_ok(original_html: str, result_content: str) -> bool:
     return len(result_content) >= MIN_OUTPUT_LENGTH_RATIO * len(original_html)
 
 
+def _strip_json_fence(content: str) -> str:
+    """Remove ```json and ``` wrapper if present."""
+    s = content.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+    return s.strip()
+
+
+def _parse_diglot_json(content: str) -> Optional[Tuple[str, List[str]]]:
+    """
+    Parse LLM response as JSON. Returns (main_text, glossary_list) or None if invalid.
+    glossary_list items are strings like "word: перевод".
+    """
+    if not content or not content.strip():
+        return None
+    s = _strip_json_fence(content)
+    try:
+        data = json.loads(s)
+    except json.JSONDecodeError as e:
+        logger.debug("Diglot JSON parse failed: %s", e)
+        return None
+    if not isinstance(data, dict):
+        return None
+    main_text = data.get("main_text")
+    glossary = data.get("glossary")
+    if main_text is None or not isinstance(main_text, str):
+        return None
+    if glossary is None:
+        glossary = []
+    if not isinstance(glossary, list):
+        glossary = [str(g) for g in glossary] if hasattr(glossary, "__iter__") else []
+    glossary = [str(item).strip() for item in glossary if item]
+    return (main_text.strip(), glossary)
+
+
+def _assemble_chapter_from_json(main_text: str, glossary: List[str], use_uppercase: bool) -> str:
+    """
+    Assemble final chapter: glossary block + separator + main_text.
+    Glossary is formatted as HTML so extract_glossary_to_vocab can parse it (EPUB/TXT).
+    """
+    if not glossary:
+        return main_text
+    # Format each "word: перевод" as <li><b>word</b> — перевод</li>
+    items = []
+    for entry in glossary:
+        entry = entry.strip()
+        for sep in (": ", ":", " — ", " - "):
+            if sep in entry:
+                parts = entry.split(sep, 1)
+                if len(parts) == 2:
+                    word, trans = parts[0].strip(), parts[1].strip()
+                    if word:
+                        items.append(f"<li><b>{word}</b> — {trans}</li>")
+                break
+        else:
+            if entry:
+                items.append(f"<li><b>{entry}</b></li>")
+    if not items:
+        return main_text
+    glossary_html = (
+        "<h3>Chapter Vocabulary</h3><ul>"
+        + "".join(items)
+        + "</ul><hr/>"
+    )
+    return glossary_html + "\n" + main_text
+
+
 def _is_model_not_found_error(exc: Exception) -> bool:
     """True if API returned 404 or 'Model not found' (for sync fallback)."""
     msg = str(exc).lower()
@@ -62,39 +130,35 @@ def _is_model_not_found_error(exc: Exception) -> bool:
 
 MIN_OUTPUT_LENGTH_RATIO = 0.8  # Reject if AI returns less than 80% of original length
 
-DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher.
+# JSON output: % calculated ONLY on main_text; glossary generated separately
+DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher. You MUST respond with ONLY valid JSON.
 
-1. Translate the text according to the target percentage ({target_percent}%).
-2. Create a 'Chapter Vocabulary' list at the start of this chapter: 10-15 unique, interesting words. Do not repeat words from previous chapters' glossaries. Format: <h3>Chapter Vocabulary</h3><ul><li><b>word</b> — перевод</li>...</ul><hr/>
-   - Skip very simple words (e.g. house, man, go, good, big). Focus on difficult, rare, or meaning-heavy words. Glossary words must match how they appear in the text.
-3. PROPER NOUNS: Always keep names, cities, and places in original Russian Cyrillic (e.g. Амалия, Урсула, Лондон). Never translate or transliterate them.
-
-Rules for translation:
-- DISTRIBUTION: Scatter words RANDOMLY. Do not translate only the beginning of sentences.
-- FORMAT: Continue to wrap ALL English words in <b>tags</b> (e.g., <b>word</b>) to highlight them for the reader.
-- Replace approximately {target_words_count} words. Text length: {total_words} words.
-- FULL TEXT ONLY: Return the ENTIRE text. No skipping sentences or summarizing.
+1. MAIN TEXT: Translate the BODY text according to the target percentage ({target_percent}%). The percentage applies ONLY to the main story text — do NOT include the glossary in the word count or percentage calculation.
+   - Replace approximately {target_words_count} words in the main text. Text length: {total_words} words (count only the body).
+   - Preserve all HTML in main_text (e.g. <p>, <div>, <br>). Wrap every English word in <b>tags</b> (e.g., <b>word</b>).
+   - DISTRIBUTION: Scatter words RANDOMLY. FULL TEXT ONLY: return the ENTIRE body. No skipping or summarizing.
+2. GLOSSARY: Build a separate list from the English words you replaced in main_text: 10-15 unique, interesting words. Format each entry as "word: перевод". Steps: (a) Collect the replaced words from main_text; (b) Deduplicate; (c) Sort alphabetically; (d) Do not repeat words from previous chapters' glossaries. Skip very simple words (house, man, go). Glossary entries must match how words appear in main_text.
+3. PROPER NOUNS: Keep names, cities, places in original Russian Cyrillic (e.g. Амалия, Урсула, Лондон). Never translate them.
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
-ASSEMBLY: Output must be [GLOSSARY] + <hr /> + [TRANSLATED TEXT]. Preserve all HTML (e.g. <p>, <div>, <br>). Respond with ONLY the full HTML. No markdown."""
+OUTPUT: Respond with ONLY this JSON (no markdown, no code fence, no commentary):
+{"main_text": "<p>...</p>", "glossary": ["word: перевод", "word2: перевод", ...]}"""
 
-# For .txt: Chapter Vocabulary (may use <b>) at top; story text = plain, no highlighting
-DIGLOT_SYSTEM_PROMPT_TXT = """You are a 'Diglot Weave' teacher for .txt output (clean integration).
+# For .txt: main_text is plain (no HTML); glossary separate
+DIGLOT_SYSTEM_PROMPT_TXT = """You are a 'Diglot Weave' teacher for .txt output. You MUST respond with ONLY valid JSON.
 
-1. Translate the text according to the target percentage ({target_percent}%).
-2. Include a 'Chapter Vocabulary' at the TOP: 10-15 unique, interesting English words. Exception: in this glossary section you MAY use <b>word</b> for clarity. Format: <h3>Chapter Vocabulary</h3><ul><li><b>word</b> — перевод</li>...</ul><hr/>
-   Do not repeat words from previous chapters' glossaries.
-3. PROPER NOUNS: Always keep names, cities, and places in original Russian Cyrillic (e.g. Амалия, Урсула, Лондон). Never translate or transliterate them.
-
-STORY TEXT (after the glossary):
-- STRICT: Do NOT use any HTML tags (like <b>), UPPERCASE, or special symbols (like asterisks) to highlight English words in the story text. Integrate English words into the Russian sentences as plain, seamless text. The reader should distinguish them only by the language itself.
-- DISTRIBUTION: Scatter words RANDOMLY. Replace approximately {target_words_count} words. Text length: {total_words} words.
-- FULL TEXT ONLY: Return the ENTIRE story after the glossary. No skipping or summarizing.
+1. MAIN TEXT: Translate the BODY text according to the target percentage ({target_percent}%). The percentage applies ONLY to the main story text — do NOT include the glossary in the word count or percentage calculation.
+   - Replace approximately {target_words_count} words. Text length: {total_words} words (body only).
+   - STORY TEXT: Do NOT use any HTML, UPPERCASE, or asterisks. Integrate English as plain, seamless text. Reader distinguishes by language only.
+   - DISTRIBUTION: Scatter words RANDOMLY. FULL TEXT ONLY: return the ENTIRE story. No skipping or summarizing.
+2. GLOSSARY: Build a separate list from the English words you replaced in main_text: 10-15 unique entries. Format each as "word: перевод". Steps: (a) Collect replaced words from main_text; (b) Deduplicate; (c) Sort alphabetically; (d) Do not repeat words from previous chapters.
+3. PROPER NOUNS: Keep names, cities, places in Russian Cyrillic (e.g. Амалия, Лондон).
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
-OUTPUT: [GLOSSARY with <b> allowed] + <hr /> + [STORY in plain text only — no HTML, no UPPERCASE, no asterisks]."""
+OUTPUT: Respond with ONLY this JSON (no markdown, no code fence, no commentary):
+{"main_text": "plain story text here...", "glossary": ["word: перевод", "word2: перевод", ...]}"""
 
 
 class OpenRouterTranslator:
@@ -371,8 +435,8 @@ class OpenRouterTranslator:
                 already_glossaried_instruction=already_glossaried_instruction,
             )
             user = (
-                f"Process the following text. Add 'Chapter Vocabulary' (10-15 words, <b> allowed in glossary only), then <hr />, then the story. "
-                f"Replace approximately {target_words_count} words with English. In the STORY part use NO HTML, no UPPERCASE, no asterisks — plain seamless text only.\n\n"
+                f"Process the following text. Replace approximately {target_words_count} words in the BODY only. "
+                "Output JSON with main_text (plain story, no HTML/UPPERCASE/asterisks) and glossary (list of 'word: перевод').\n\n"
                 + html
             )
         else:
@@ -386,29 +450,34 @@ class OpenRouterTranslator:
             if ratio < 0.30:
                 system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."
             user = (
-                "Process the following HTML. Add a 'Chapter Vocabulary' (10-15 sophisticated words only, format in instructions), then <hr />, then the translated text. "
-                f"Replace approximately {target_words_count} words with English (wrap in <b>). Skip simple words in the glossary. "
-                "Reply with ONLY the full HTML (glossary + <hr /> + chapter).\n\n"
+                "Process the following HTML. Replace approximately "
+                f"{target_words_count} words in the BODY only. Reply with ONLY the JSON object (main_text + glossary).\n\n"
                 + html
             )
 
-        def _valid_out(out: Optional[str]) -> bool:
+        def _try_parse_and_assemble(out: Optional[str]) -> Optional[str]:
+            """Parse JSON; validate % on main_text only; return assembled chapter or None."""
             if not out:
-                return False
-            if not _output_length_ok(html, out):
+                return None
+            data = _parse_diglot_json(out)
+            if not data:
+                return None
+            main_text, glossary = data
+            if not _output_length_ok(html, main_text):
                 logger.warning(
-                    "Chapter output too short (<%s%% of original length), retrying or using fallback",
+                    "Chapter main_text too short (<%s%% of original), retrying or using fallback",
                     int(MIN_OUTPUT_LENGTH_RATIO * 100),
                 )
-                return False
-            return True
+                return None
+            return _assemble_chapter_from_json(main_text, glossary, use_uppercase)
 
         # Tier 1: selected model, 3 attempts, 5s delay
         for attempt in range(TIER1_ATTEMPTS):
             try:
                 out = await self._call_chapter_once(self.model, system, user)
-                if _valid_out(out):
-                    return out
+                assembled = _try_parse_and_assemble(out)
+                if assembled:
+                    return assembled
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
@@ -420,8 +489,9 @@ class OpenRouterTranslator:
         for attempt in range(TIER2_ATTEMPTS):
             try:
                 out = await self._call_chapter_once(TIER2_MODEL, system, user)
-                if _valid_out(out):
-                    return out
+                assembled = _try_parse_and_assemble(out)
+                if assembled:
+                    return assembled
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
@@ -431,8 +501,9 @@ class OpenRouterTranslator:
         for attempt in range(TIER3_ATTEMPTS):
             try:
                 out = await self._call_chapter_once(TIER3_MODEL, system, user)
-                if _valid_out(out):
-                    return out
+                assembled = _try_parse_and_assemble(out)
+                if assembled:
+                    return assembled
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
