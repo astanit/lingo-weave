@@ -101,10 +101,11 @@ async def _weave_chapter_async(
     target_percent: float,
     previous_vocab: Optional[Dict[str, str]] = None,
     already_glossaried: Optional[Set[str]] = None,
+    use_uppercase: bool = False,
 ) -> str:
     """
     Diglot Weave: word count before AI call; then non-blocking API.
-    already_glossaried: English words from previous glossaries so this chapter's glossary stays "New Words" only.
+    use_uppercase=True for .txt: plain text output, English in UPPERCASE, no HTML/glossary.
     """
     total_words = count_chapter_words(html)
     target_words_count = max(0, int(round(total_words * ratio)))
@@ -118,6 +119,7 @@ async def _weave_chapter_async(
         target_percent=target_percent,
         previous_vocab=previous_vocab or {},
         already_glossaried=already_glossaried,
+        use_uppercase=use_uppercase,
     )
 
 
@@ -129,10 +131,11 @@ async def process_one_segment_async(
     options: WeaveOptions,
     global_vocab: Dict[str, str],
     already_glossaried: Set[str],
+    use_uppercase: bool = False,
 ) -> str:
     """
-    Process one segment (virtual chapter) with Diglot Weave. Updates global_vocab and already_glossaried.
-    Used by TXT and FB2 weavers. Returns weaved HTML.
+    Process one segment (virtual chapter) with Diglot Weave. When use_uppercase=False, updates global_vocab and already_glossaried.
+    use_uppercase=True for .txt: plain text output, no glossary. Returns weaved HTML or plain text.
     """
     ratio = chapter_target_ratio(segment_index, total_segments)
     target_percent = round(ratio * 100)
@@ -145,8 +148,10 @@ async def process_one_segment_async(
         target_percent=float(target_percent),
         previous_vocab=global_vocab,
         already_glossaried=already_glossaried,
+        use_uppercase=use_uppercase,
     )
-    extract_glossary_to_vocab(weaved, global_vocab, already_glossaried=already_glossaried)
+    if not use_uppercase:
+        extract_glossary_to_vocab(weaved, global_vocab, already_glossaried=already_glossaried)
     return weaved
 
 

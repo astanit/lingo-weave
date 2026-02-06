@@ -85,6 +85,21 @@ Rules for translation:
 
 ASSEMBLY: Output must be [GLOSSARY] + <hr /> + [TRANSLATED TEXT]. Preserve all HTML (e.g. <p>, <div>, <br>). Respond with ONLY the full HTML. No markdown."""
 
+# For .txt: no HTML, highlight English with UPPERCASE
+DIGLOT_SYSTEM_PROMPT_TXT = """You are a 'Diglot Weave' teacher for PLAIN TEXT output.
+
+1. Translate the text according to the target percentage ({target_percent}%).
+2. DO NOT use <b> tags or any HTML. Instead, write all English words in UPPERCASE (e.g., WORD) to highlight them.
+3. Rules for translation:
+   - DISTRIBUTION: Scatter words RANDOMLY. Do not translate only the beginning of sentences.
+   - PROPER NOUNS: NEVER translate or transliterate Russian proper names, cities, or places. Keep them in Cyrillic.
+   - Replace approximately {target_words_count} words. Text length: {total_words} words.
+   - FULL TEXT ONLY: Return the ENTIRE text. No glossary, no HTML, no markdown. Plain text only. English words in UPPERCASE.
+{previous_vocab_instruction}
+{already_glossaried_instruction}
+
+OUTPUT: Respond with ONLY the plain text. No glossary section. No <hr />. No HTML/CSS. English words in UPPERCASE."""
+
 
 class OpenRouterTranslator:
     def __init__(self, model: Optional[str] = None) -> None:
@@ -213,20 +228,32 @@ class OpenRouterTranslator:
         "Keep Cyrillic names unchanged. Output only the text."
     )
 
+    TRIAL_SYSTEM_PROMPT_UPPERCASE = (
+        "Replace about 40% of Russian words with English. DO NOT use <b> or any HTML. "
+        "Write every English word in UPPERCASE (e.g., WORD). Keep Cyrillic names unchanged. "
+        "Output ONLY plain text. No HTML, no markdown."
+    )
+
     async def translate_simple(
-        self, snippet_text: str, target_percent: int = 40, model_id: Optional[str] = None
+        self,
+        snippet_text: str,
+        target_percent: int = 40,
+        model_id: Optional[str] = None,
+        highlight_style: str = "BOLD_TAGS",
     ) -> str:
-        """Standalone trial: 40% Diglot Weave. If result has no <b> tags, retry with gpt-4o-mini. Returns UTF-8 safe str."""
+        """Standalone trial. highlight_style: 'UPPERCASE' for .txt (plain text), 'BOLD_TAGS' for .epub/.fb2. Returns UTF-8 safe str."""
         if not (snippet_text or snippet_text.strip()):
             return snippet_text or ""
         text = snippet_text.strip()
         model = model_id or self.model
+        use_uppercase = (highlight_style or "BOLD_TAGS").upper() == "UPPERCASE"
+        system_prompt = self.TRIAL_SYSTEM_PROMPT_UPPERCASE if use_uppercase else self.TRIAL_SYSTEM_PROMPT_40
         try:
-            print(f"DEBUG: Using model slug '{model}' for trial (target_percent={target_percent})")
+            print(f"DEBUG: Using model slug '{model}' for trial (target_percent={target_percent}, highlight_style={highlight_style})")
             resp = await self.async_client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": self.TRIAL_SYSTEM_PROMPT_40},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
                 temperature=0.3,
@@ -238,6 +265,26 @@ class OpenRouterTranslator:
                 content = re.sub(r"^```(?:html)?\s*", "", content)
                 content = re.sub(r"\s*```$", "", content)
             content = content.strip()
+            if use_uppercase:
+                # For TXT: accept plain text; optional retry if no UPPERCASE English words
+                if re.search(r"\b[A-Z]{2,}\b", content):
+                    return content
+                print("DEBUG: Trial UPPERCASE result has no obvious UPPERCASE words, retrying with gpt-4o-mini")
+                try:
+                    resp2 = await self.async_client.chat.completions.create(
+                        model=FALLBACK_MODEL,
+                        messages=[
+                            {"role": "system", "content": self.TRIAL_SYSTEM_PROMPT_UPPERCASE},
+                            {"role": "user", "content": text},
+                        ],
+                        temperature=0.3,
+                    )
+                    content2 = (resp2.choices[0].message.content or "").strip()
+                    if content2:
+                        return content2.strip()
+                except Exception as e2:
+                    logger.warning("Trial retry failed: %s", e2)
+                return content
             if "<b>" not in content and "<b " not in content:
                 print("DEBUG: Trial result has no <b> tags, retrying with gpt-4o-mini")
                 try:
@@ -295,11 +342,10 @@ class OpenRouterTranslator:
         target_percent: float = 100.0,
         previous_vocab: Optional[Dict[str, str]] = None,
         already_glossaried: Optional[set] = None,
+        use_uppercase: bool = False,
     ) -> str:
         """
-        Process a full chapter HTML with Diglot Weave. Triple-tier fallback:
-        Tier 1 = selected model (3 attempts, 5s delay), Tier 2 = gpt-4o-mini (2 attempts),
-        Tier 3 = gemini-2.0-flash (2 attempts). If all fail, return original HTML.
+        Process a full chapter with Diglot Weave. If use_uppercase=True (for .txt), output is plain text with UPPERCASE English words, no HTML.
         """
         if target_words_count <= 0:
             return html
@@ -307,7 +353,7 @@ class OpenRouterTranslator:
         if previous_vocab and len(previous_vocab) > 0:
             prev_list = " ".join(f"{ru}→{en}" for ru, en in list(previous_vocab.items())[:80])
             previous_vocab_instruction = (
-                f"\n\nPREVIOUS CHAPTERS VOCABULARY (use these same English words when you see these Russian words): {prev_list}"
+                f"\n\nPREVIOUS VOCABULARY (use these English words when you see these Russian): {prev_list}"
             )
         else:
             previous_vocab_instruction = ""
@@ -315,30 +361,40 @@ class OpenRouterTranslator:
         if already_glossaried and len(already_glossaried) > 0:
             already_list = ", ".join(sorted(already_glossaried)[:100])
             already_glossaried_instruction = (
-                f"\n\nDo NOT include these words in this chapter's glossary (already in previous chapters): {already_list}. "
-                "Every glossary should be a 'New Words' list only."
+                f"\n\nDo NOT reuse these in glossary: {already_list}."
             )
         else:
-            already_glossaried_instruction = (
-                "\n\nTry to pick words that are unique to this specific context and haven't likely been featured in basic introductory vocabulary."
+            already_glossaried_instruction = ""
+
+        if use_uppercase:
+            system = DIGLOT_SYSTEM_PROMPT_TXT.format(
+                total_words=total_words,
+                target_words_count=target_words_count,
+                target_percent=int(round(target_percent)),
+                previous_vocab_instruction=previous_vocab_instruction,
+                already_glossaried_instruction=already_glossaried_instruction,
             )
-
-        system = DIGLOT_SYSTEM_PROMPT.format(
-            total_words=total_words,
-            target_words_count=target_words_count,
-            target_percent=int(round(target_percent)),
-            previous_vocab_instruction=previous_vocab_instruction,
-            already_glossaried_instruction=already_glossaried_instruction,
-        )
-        if ratio < 0.30:
-            system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."
-
-        user = (
-            "Process the following HTML. Add a 'Chapter Vocabulary' (10-15 sophisticated words only, format in instructions), then <hr />, then the translated text. "
-            f"Replace approximately {target_words_count} words with English (wrap in <b>). Skip simple words in the glossary. "
-            "Reply with ONLY the full HTML (glossary + <hr /> + chapter).\n\n"
-            + html
-        )
+            user = (
+                f"Process the following text. Replace approximately {target_words_count} words with English in UPPERCASE. "
+                "Output ONLY plain text. No HTML, no glossary, no <b> tags. English words in UPPERCASE.\n\n"
+                + html
+            )
+        else:
+            system = DIGLOT_SYSTEM_PROMPT.format(
+                total_words=total_words,
+                target_words_count=target_words_count,
+                target_percent=int(round(target_percent)),
+                previous_vocab_instruction=previous_vocab_instruction,
+                already_glossaried_instruction=already_glossaried_instruction,
+            )
+            if ratio < 0.30:
+                system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."
+            user = (
+                "Process the following HTML. Add a 'Chapter Vocabulary' (10-15 sophisticated words only, format in instructions), then <hr />, then the translated text. "
+                f"Replace approximately {target_words_count} words with English (wrap in <b>). Skip simple words in the glossary. "
+                "Reply with ONLY the full HTML (glossary + <hr /> + chapter).\n\n"
+                + html
+            )
 
         def _valid_out(out: Optional[str]) -> bool:
             if not out:

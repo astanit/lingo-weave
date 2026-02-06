@@ -9,7 +9,6 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from app.services.epub_weave import (
     WeaveOptions,
-    html_to_plain,
     process_one_segment_async,
 )
 from app.services.openrouter_translate import OpenRouterTranslator
@@ -82,9 +81,11 @@ def weave_txt(
         for idx, plain in enumerate(segments_plain):
             seg_html = _wrap_segment_html(plain)
             weaved = await process_one_segment_async(
-                seg_html, idx, total, translator, options, global_vocab, already_glossaried
+                seg_html, idx, total, translator, options, global_vocab, already_glossaried,
+                use_uppercase=True,
             )
-            results.append(html_to_plain(weaved))
+            # TXT: weaved is already plain text with UPPERCASE (no HTML)
+            results.append(weaved)
             if progress_callback:
                 await progress_callback(idx + 1, total)
         return results
@@ -131,9 +132,10 @@ async def run_weave_txt_async(
     for idx, plain in enumerate(segments_plain):
         seg_html = _wrap_segment_html(plain)
         weaved = await process_one_segment_async(
-            seg_html, idx, total, translator, options, global_vocab, already_glossaried
+            seg_html, idx, total, translator, options, global_vocab, already_glossaried,
+            use_uppercase=True,
         )
-        results_plain.append(html_to_plain(weaved))
+        results_plain.append(weaved)  # TXT: already plain text with UPPERCASE
         if progress_callback:
             await progress_callback(idx + 1, total)
 

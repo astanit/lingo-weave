@@ -273,7 +273,10 @@ async def _run_trial_then_upsell(
     await bot.send_message(chat_id, "Готовлю ваш пробный фрагмент (40% погружения)... ⏳")
     from app.services.openrouter_translate import OpenRouterTranslator
     translator = OpenRouterTranslator(model=TRIAL_MODEL)
-    translated_snippet = await translator.translate_simple(snippet_text, target_percent=40, model_id=TRIAL_MODEL)
+    highlight_style = "UPPERCASE" if ext == ".txt" else "BOLD_TAGS"
+    translated_snippet = await translator.translate_simple(
+        snippet_text, target_percent=40, model_id=TRIAL_MODEL, highlight_style=highlight_style
+    )
     if isinstance(translated_snippet, bytes):
         translated_snippet = translated_snippet.decode("utf-8", errors="replace")
     translated_snippet = (translated_snippet or "").strip()
