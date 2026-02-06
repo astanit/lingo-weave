@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 
 from app.services.openrouter_translate import OpenRouterTranslator
+from app.services.anki_export import get_glossary_entries_with_examples
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ async def _weave_chapter_async(
     previous_vocab: Optional[Dict[str, str]] = None,
     already_glossaried: Optional[Set[str]] = None,
     use_uppercase: bool = False,
+    target_level: Optional[str] = None,
 ) -> str:
     """
     Diglot Weave: word count before AI call; then non-blocking API.
@@ -119,6 +121,7 @@ async def _weave_chapter_async(
         previous_vocab=previous_vocab or {},
         already_glossaried=already_glossaried,
         use_uppercase=use_uppercase,
+        target_level=target_level,
     )
 
 
@@ -131,6 +134,7 @@ async def process_one_segment_async(
     global_vocab: Dict[str, str],
     already_glossaried: Set[str],
     use_uppercase: bool = False,
+    target_level: Optional[str] = None,
 ) -> str:
     """
     Process one segment (virtual chapter) with Diglot Weave. Updates global_vocab and already_glossaried from glossary.
@@ -148,6 +152,7 @@ async def process_one_segment_async(
         previous_vocab=global_vocab,
         already_glossaried=already_glossaried,
         use_uppercase=use_uppercase,
+        target_level=target_level,
     )
     extract_glossary_to_vocab(weaved, global_vocab, already_glossaried=already_glossaried)
     return weaved
@@ -194,6 +199,7 @@ async def _process_single_chapter_async(
     options: WeaveOptions,
     previous_vocab: Optional[Dict[str, str]] = None,
     already_glossaried: Optional[Set[str]] = None,
+    target_level: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Process one chapter (non-blocking). Returns (item_id, html). Uses previous_vocab for consistency.
@@ -218,6 +224,7 @@ async def _process_single_chapter_async(
             target_percent=target_percent,
             previous_vocab=previous_vocab,
             already_glossaried=already_glossaried,
+            target_level=target_level,
         )
         if weaved is None or not isinstance(weaved, str):
             weaved = original
@@ -238,7 +245,8 @@ async def _weave_epub_async(
     options: WeaveOptions,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
-) -> Tuple[str, str]:
+    target_level: Optional[str] = None,
+) -> Tuple[str, str, int, int, List[Tuple[str, str, str]]]:
     options = options or WeaveOptions()
     out_root = Path(outputs_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -249,7 +257,6 @@ async def _weave_epub_async(
 
     book = epub.read_epub(input_epub_path)
     all_items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
-    # Only process ITEM_DOCUMENT (skip images, styles, etc.)
     items = [
         i
         for i in all_items
@@ -259,11 +266,12 @@ async def _weave_epub_async(
     translator = OpenRouterTranslator(model=model_id)
     total = len(items)
     failed_count = 0
-    global_vocab: Dict[str, str] = {}  # Russian -> English across chapters
-    already_glossaried: Set[str] = set()  # English words already in previous glossaries (smart glossary memory)
+    global_vocab: Dict[str, str] = {}
+    already_glossaried: Set[str] = set()
     translated_items: Dict[str, str] = {}
+    anki_entries: List[Tuple[str, str, str]] = []
+    anki_seen: Set[str] = set()  # dedupe by front (lowercase)
 
-    # Process chapters sequentially: each gets previous vocab + already_glossaried so glossary = "New Words" only
     for idx, item in enumerate(items):
         item_id = _get_item_id(item, idx)
         try:
@@ -275,10 +283,16 @@ async def _weave_epub_async(
                 options,
                 previous_vocab=global_vocab,
                 already_glossaried=already_glossaried,
+                target_level=target_level,
             )
             if html is not None and isinstance(html, str):
                 translated_items[rid] = html
                 extract_glossary_to_vocab(html, global_vocab, already_glossaried=already_glossaried)
+                for front, back, example in get_glossary_entries_with_examples(html):
+                    key = front.lower().strip()
+                    if key not in anki_seen:
+                        anki_seen.add(key)
+                        anki_entries.append((front, back, example))
                 print(f"Chapter {idx + 1}: Success", flush=True)
                 if progress_callback:
                     await progress_callback(idx + 1, total)
@@ -332,7 +346,7 @@ async def _weave_epub_async(
 
     output_path = str(out_dir / "lingoweave.epub")
     epub.write_epub(output_path, book)
-    return job_id, output_path, failed_count, total
+    return job_id, output_path, failed_count, total, anki_entries
 
 
 def weave_epub(
@@ -352,7 +366,7 @@ def weave_epub(
             options=options,
         )
     )
-    return job_id, output_path
+    return job_id, output_path  # *_ consumes failed_count, total, anki_entries
 
 
 async def run_weave_epub_async(
@@ -361,8 +375,9 @@ async def run_weave_epub_async(
     options: WeaveOptions | None = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
-) -> Tuple[str, str, int, int]:
-    """Async entry point for EPUB weave. Returns (job_id, output_path, failed_count, total_chapters)."""
+    target_level: Optional[str] = None,
+) -> Tuple[str, str, int, int, List[Tuple[str, str, str]]]:
+    """Async entry point for EPUB weave. Returns (job_id, output_path, failed_count, total_chapters, anki_entries)."""
     options = options or WeaveOptions()
     return await _weave_epub_async(
         input_epub_path=input_epub_path,
@@ -370,4 +385,5 @@ async def run_weave_epub_async(
         options=options,
         progress_callback=progress_callback,
         model_id=model_id,
+        target_level=target_level,
     )

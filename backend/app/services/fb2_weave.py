@@ -14,6 +14,7 @@ from app.services.epub_weave import (
     process_one_segment_async,
 )
 from app.services.openrouter_translate import OpenRouterTranslator
+from app.services.anki_export import get_glossary_entries_with_examples
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +153,9 @@ async def run_weave_fb2_async(
     options: Optional[WeaveOptions] = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
-) -> Tuple[str, str]:
-    """Async entry point for FB2 weave with optional progress (e.g. for Telegram bot)."""
+    target_level: Optional[str] = None,
+) -> Tuple[str, str, List[Tuple[str, str, str]]]:
+    """Async entry point for FB2 weave. Returns (job_id, output_path, anki_entries)."""
     options = options or WeaveOptions()
     out_root = Path(outputs_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -169,21 +171,29 @@ async def run_weave_fb2_async(
     if not items:
         output_path = str(out_dir / "lingoweave.fb2")
         tree.write(output_path, encoding="utf-8", xml_declaration=True, method="xml")
-        return job_id, output_path
+        return job_id, output_path, []
 
     segments = _segment_by_char_count(items)
     translator = OpenRouterTranslator(model=model_id)
     global_vocab: Dict[str, str] = {}
     already_glossaried: Set[str] = set()
     total = len(segments)
+    anki_entries: List[Tuple[str, str, str]] = []
+    anki_seen: Set[str] = set()
 
     weaved_list = []
     for idx, seg in enumerate(segments):
         seg_html = _wrap_segment_html(seg)
         weaved = await process_one_segment_async(
             seg_html, idx, total, translator, options, global_vocab, already_glossaried,
+            target_level=target_level,
         )
         weaved_list.append(weaved)
+        for front, back, example in get_glossary_entries_with_examples(weaved):
+            key = front.lower().strip()
+            if key not in anki_seen:
+                anki_seen.add(key)
+                anki_entries.append((front, back, example))
         if progress_callback:
             await progress_callback(idx + 1, total)
 
@@ -197,4 +207,4 @@ async def run_weave_fb2_async(
 
     output_path = str(out_dir / "lingoweave.fb2")
     tree.write(output_path, encoding="utf-8", xml_declaration=True, method="xml")
-    return job_id, output_path
+    return job_id, output_path, anki_entries

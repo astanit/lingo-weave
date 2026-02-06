@@ -62,15 +62,26 @@ def _is_model_not_found_error(exc: Exception) -> bool:
 
 MIN_OUTPUT_LENGTH_RATIO = 0.8  # Reject if AI returns less than 80% of original length
 
+# Level-based vocabulary filtering (A1–C1)
+LEVEL_INSTRUCTIONS = {
+    "A1": "Focus on basic vocabulary (colors, family, objects, simple verbs). Example: house, run, big.",
+    "A2": "Focus on basic vocabulary (colors, family, objects, simple verbs). Example: house, run, big.",
+    "B1": "Ignore basic words. Target intermediate vocabulary (abstract concepts, phrasal verbs, adjectives). Example: achieve, realize, essential.",
+    "B2": "Ignore basic words. Target intermediate vocabulary (abstract concepts, phrasal verbs, adjectives). Example: achieve, realize, essential.",
+    "C1": "Ignore common words. Only use rare, literary, academic vocabulary. Example: endeavor, profound, unconscious.",
+}
+
 # Simple diglot weave: direct text output (weave + glossary in one string). No JSON.
 DIGLOT_SYSTEM_PROMPT = """You are a Diglot Weave teacher. Rewrite the text replacing exactly {target_percent}% of words with English. Wrap every English word in <b>tags</b> (e.g. <b>word</b>). Preserve all HTML (e.g. <p>, <div>, <br>). Keep names and places in original Russian Cyrillic. At the end add: Glossary: word — перевод (one per line, 10-15 words). Return the full text + glossary in one response. No JSON, no code blocks.
 {previous_vocab_instruction}
-{already_glossaried_instruction}"""
+{already_glossaried_instruction}
+{level_instruction}"""
 
 # For .txt: plain text, no HTML; glossary at end
 DIGLOT_SYSTEM_PROMPT_TXT = """You are a Diglot Weave teacher for plain text. Rewrite the text replacing exactly {target_percent}% of words with English. Do NOT use HTML, UPPERCASE, or asterisks — integrate English as plain text. Keep names in Russian Cyrillic. At the end add: Glossary: word — перевод (one per line, 10-15 words). Return the full text + glossary in one response. No JSON, no code blocks.
 {previous_vocab_instruction}
-{already_glossaried_instruction}"""
+{already_glossaried_instruction}
+{level_instruction}"""
 
 
 class OpenRouterTranslator:
@@ -315,9 +326,10 @@ class OpenRouterTranslator:
         previous_vocab: Optional[Dict[str, str]] = None,
         already_glossaried: Optional[set] = None,
         use_uppercase: bool = False,
+        target_level: Optional[str] = None,
     ) -> str:
         """
-        Process a full chapter with Diglot Weave.
+        Process a full chapter with Diglot Weave. target_level: A1, A2, B1, B2, C1 for vocabulary filtering.
         """
         if target_words_count <= 0:
             return html
@@ -338,11 +350,17 @@ class OpenRouterTranslator:
         else:
             already_glossaried_instruction = ""
 
+        level_key = (target_level or "").upper()
+        level_instruction = ""
+        if level_key in LEVEL_INSTRUCTIONS:
+            level_instruction = f"\n\nVOCABULARY LEVEL ({level_key}): {LEVEL_INSTRUCTIONS[level_key]}"
+
         if use_uppercase:
             system = DIGLOT_SYSTEM_PROMPT_TXT.format(
                 target_percent=int(round(target_percent)),
                 previous_vocab_instruction=previous_vocab_instruction,
                 already_glossaried_instruction=already_glossaried_instruction,
+                level_instruction=level_instruction,
             )
             user = f"Rewrite the following text. Replace exactly {target_words_count} words (~{int(round(target_percent))}%) with English. At the end add Glossary: word — перевод.\n\n" + html
         else:
@@ -350,6 +368,7 @@ class OpenRouterTranslator:
                 target_percent=int(round(target_percent)),
                 previous_vocab_instruction=previous_vocab_instruction,
                 already_glossaried_instruction=already_glossaried_instruction,
+                level_instruction=level_instruction,
             )
             if ratio < 0.30:
                 system += "\n\n**Low immersion:** Prefer replacing nouns and objects. Keep sentences natural."

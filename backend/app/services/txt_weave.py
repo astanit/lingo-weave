@@ -12,6 +12,7 @@ from app.services.epub_weave import (
     process_one_segment_async,
 )
 from app.services.openrouter_translate import OpenRouterTranslator
+from app.services.anki_export import get_glossary_entries_with_examples
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +105,9 @@ async def run_weave_txt_async(
     options: Optional[WeaveOptions] = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
-) -> Tuple[str, str]:
-    """Async entry point for TXT weave with optional progress (e.g. for Telegram bot)."""
+    target_level: Optional[str] = None,
+) -> Tuple[str, str, List[Tuple[str, str, str]]]:
+    """Async entry point for TXT weave. Returns (job_id, output_path, anki_entries)."""
     options = options or WeaveOptions()
     out_root = Path(outputs_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -121,12 +123,14 @@ async def run_weave_txt_async(
         output_path = str(out_dir / "lingoweave.txt")
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("")
-        return job_id, output_path
+        return job_id, output_path, []
 
     translator = OpenRouterTranslator(model=model_id)
     global_vocab: Dict[str, str] = {}
     already_glossaried: Set[str] = set()
     total = len(segments_plain)
+    anki_entries: List[Tuple[str, str, str]] = []
+    anki_seen: Set[str] = set()
 
     results_plain = []
     for idx, plain in enumerate(segments_plain):
@@ -134,8 +138,14 @@ async def run_weave_txt_async(
         weaved = await process_one_segment_async(
             seg_html, idx, total, translator, options, global_vocab, already_glossaried,
             use_uppercase=True,
+            target_level=target_level,
         )
-        results_plain.append(weaved)  # TXT: already plain text
+        results_plain.append(weaved)
+        for front, back, example in get_glossary_entries_with_examples(weaved):
+            key = front.lower().strip()
+            if key not in anki_seen:
+                anki_seen.add(key)
+                anki_entries.append((front, back, example))
         if progress_callback:
             await progress_callback(idx + 1, total)
 
@@ -143,4 +153,4 @@ async def run_weave_txt_async(
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n\n".join(results_plain))
 
-    return job_id, output_path
+    return job_id, output_path, anki_entries
