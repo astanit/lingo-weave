@@ -68,7 +68,7 @@ def _parse_diglot_json(content: str) -> Optional[Tuple[str, List[str]]]:
     try:
         data = json.loads(s)
     except json.JSONDecodeError as e:
-        logger.debug("Diglot JSON parse failed: %s", e)
+        logger.warning("Diglot JSON parse failed: %s. Will retry or fallback.", e)
         return None
     if not isinstance(data, dict):
         return None
@@ -84,36 +84,36 @@ def _parse_diglot_json(content: str) -> Optional[Tuple[str, List[str]]]:
     return (main_text.strip(), glossary)
 
 
-def _assemble_chapter_from_json(main_text: str, glossary: List[str], use_uppercase: bool) -> str:
+def _count_english_percent(main_text: str, use_uppercase: bool) -> Optional[float]:
     """
-    Assemble final chapter: glossary block + separator + main_text.
-    Glossary is formatted as HTML so extract_glossary_to_vocab can parse it (EPUB/TXT).
+    Count percentage of English/highlighted words in main_text only.
+    EPUB: count <b>...</b> tags. TXT: count Latin-letter words (2+ chars).
+    Returns 0-100 or None if no words.
+    """
+    if not main_text or not main_text.strip():
+        return None
+    # Total word-like tokens (letters/numbers)
+    all_tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", main_text)
+    total = len(all_tokens)
+    if total == 0:
+        return None
+    if use_uppercase:
+        # Plain text: count Latin-letter words (2+ chars)
+        english = len([t for t in all_tokens if len(t) >= 2 and re.match(r"^[a-zA-Z]+$", t)])
+    else:
+        # HTML: count <b>...</b> content as English words
+        english = len(re.findall(r"<b[^>]*>([^<]+)</b>", main_text, re.IGNORECASE))
+    return 100.0 * english / total if total else None
+
+
+def _assemble_chapter_from_json(main_text: str, glossary: List[str], _use_uppercase: bool) -> str:
+    """
+    Assemble final chapter: main_text + "\n\nGlossary:\n" + "\n".join(glossary).
+    Glossary is kept separate and appended as plain text.
     """
     if not glossary:
         return main_text
-    # Format each "word: перевод" as <li><b>word</b> — перевод</li>
-    items = []
-    for entry in glossary:
-        entry = entry.strip()
-        for sep in (": ", ":", " — ", " - "):
-            if sep in entry:
-                parts = entry.split(sep, 1)
-                if len(parts) == 2:
-                    word, trans = parts[0].strip(), parts[1].strip()
-                    if word:
-                        items.append(f"<li><b>{word}</b> — {trans}</li>")
-                break
-        else:
-            if entry:
-                items.append(f"<li><b>{entry}</b></li>")
-    if not items:
-        return main_text
-    glossary_html = (
-        "<h3>Chapter Vocabulary</h3><ul>"
-        + "".join(items)
-        + "</ul><hr/>"
-    )
-    return glossary_html + "\n" + main_text
+    return main_text + "\n\nGlossary:\n" + "\n".join(glossary)
 
 
 def _is_model_not_found_error(exc: Exception) -> bool:
@@ -130,35 +130,37 @@ def _is_model_not_found_error(exc: Exception) -> bool:
 
 MIN_OUTPUT_LENGTH_RATIO = 0.8  # Reject if AI returns less than 80% of original length
 
-# JSON output: % calculated ONLY on main_text; glossary generated separately
+# JSON output: % calculated ONLY on main_text; glossary generated separately. Use {{ }} for literal braces in format().
 DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher. You MUST respond with ONLY valid JSON.
 
-1. MAIN TEXT: Translate the BODY text according to the target percentage ({target_percent}%). The percentage applies ONLY to the main story text — do NOT include the glossary in the word count or percentage calculation.
-   - Replace approximately {target_words_count} words in the main text. Text length: {total_words} words (count only the body).
-   - Preserve all HTML in main_text (e.g. <p>, <div>, <br>). Wrap every English word in <b>tags</b> (e.g., <b>word</b>).
-   - DISTRIBUTION: Scatter words RANDOMLY. FULL TEXT ONLY: return the ENTIRE body. No skipping or summarizing.
-2. GLOSSARY: Build a separate list from the English words you replaced in main_text: 10-15 unique, interesting words. Format each entry as "word: перевод". Steps: (a) Collect the replaced words from main_text; (b) Deduplicate; (c) Sort alphabetically; (d) Do not repeat words from previous chapters' glossaries. Skip very simple words (house, man, go). Glossary entries must match how words appear in main_text.
-3. PROPER NOUNS: Keep names, cities, places in original Russian Cyrillic (e.g. Амалия, Урсула, Лондон). Never translate them.
+Chain-of-Thought (follow in order):
+1. Read the input HTML body. Count total words in the BODY only (ignore any existing glossary).
+2. Compute target: exactly {target_percent}% of those words must become English in main_text. That is about {target_words_count} words. Text length: {total_words} words (body only).
+3. MAIN TEXT: Replace exactly that many words in the BODY. Percentage applies ONLY to main_text — do NOT include the glossary in word count or % calculation. Preserve all HTML (e.g. <p>, <div>, <br>). Wrap every English word in <b>tags</b> (e.g., <b>word</b>). Scatter words RANDOMLY. Return the ENTIRE body; no skipping or summarizing.
+4. GLOSSARY: From the English words you put in main_text, build a SEPARATE list: 10-15 unique entries. Format each as "word: перевод". (a) Collect replaced words from main_text; (b) Deduplicate; (c) Sort alphabetically; (d) Do not repeat words from previous chapters. Skip very simple words (house, man, go).
+5. PROPER NOUNS: Keep names, cities, places in original Russian Cyrillic (e.g. Амалия, Урсула, Лондон). Never translate them.
+6. Output ONLY the JSON object below. No markdown, no code fence, no commentary.
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
-OUTPUT: Respond with ONLY this JSON (no markdown, no code fence, no commentary):
-{"main_text": "<p>...</p>", "glossary": ["word: перевод", "word2: перевод", ...]}"""
+REMINDER: Respond with ONLY this JSON (literal braces, no extra keys):
+{{"main_text": "<p>...</p>", "glossary": ["word: перевод", "word2: перевод", ...]}}"""
 
 # For .txt: main_text is plain (no HTML); glossary separate
 DIGLOT_SYSTEM_PROMPT_TXT = """You are a 'Diglot Weave' teacher for .txt output. You MUST respond with ONLY valid JSON.
 
-1. MAIN TEXT: Translate the BODY text according to the target percentage ({target_percent}%). The percentage applies ONLY to the main story text — do NOT include the glossary in the word count or percentage calculation.
-   - Replace approximately {target_words_count} words. Text length: {total_words} words (body only).
-   - STORY TEXT: Do NOT use any HTML, UPPERCASE, or asterisks. Integrate English as plain, seamless text. Reader distinguishes by language only.
-   - DISTRIBUTION: Scatter words RANDOMLY. FULL TEXT ONLY: return the ENTIRE story. No skipping or summarizing.
-2. GLOSSARY: Build a separate list from the English words you replaced in main_text: 10-15 unique entries. Format each as "word: перевод". Steps: (a) Collect replaced words from main_text; (b) Deduplicate; (c) Sort alphabetically; (d) Do not repeat words from previous chapters.
-3. PROPER NOUNS: Keep names, cities, places in Russian Cyrillic (e.g. Амалия, Лондон).
+Chain-of-Thought (follow in order):
+1. Read the input text. Count total words in the BODY only.
+2. Compute target: exactly {target_percent}% of those words must become English in main_text. That is about {target_words_count} words. Text length: {total_words} words (body only).
+3. MAIN TEXT: Replace exactly that many words. Percentage applies ONLY to main_text — do NOT include the glossary in word count or % calculation. Do NOT use HTML, UPPERCASE, or asterisks. Integrate English as plain, seamless text. Scatter RANDOMLY. Return the ENTIRE story; no skipping or summarizing.
+4. GLOSSARY: From the English words you put in main_text, build a SEPARATE list: 10-15 unique entries. Format each as "word: перевод". (a) Collect replaced words; (b) Deduplicate; (c) Sort alphabetically; (d) Do not repeat words from previous chapters.
+5. PROPER NOUNS: Keep names, cities, places in Russian Cyrillic (e.g. Амалия, Лондон).
+6. Output ONLY the JSON object below. No markdown, no code fence, no commentary.
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
-OUTPUT: Respond with ONLY this JSON (no markdown, no code fence, no commentary):
-{"main_text": "plain story text here...", "glossary": ["word: перевод", "word2: перевод", ...]}"""
+REMINDER: Respond with ONLY this JSON (literal braces, no extra keys):
+{{"main_text": "plain story text here...", "glossary": ["word: перевод", "word2: перевод", ...]}}"""
 
 
 class OpenRouterTranslator:
@@ -455,29 +457,79 @@ class OpenRouterTranslator:
                 + html
             )
 
-        def _try_parse_and_assemble(out: Optional[str]) -> Optional[str]:
-            """Parse JSON; validate % on main_text only; return assembled chapter or None."""
-            if not out:
-                return None
-            data = _parse_diglot_json(out)
-            if not data:
-                return None
-            main_text, glossary = data
+        JSON_RETRIES = 2  # up to 2 retries on JSON decode failure (3 total tries)
+        PCT_RETRIES = 2  # up to 2 retries when % off by >10%
+
+        async def _try_one(
+            model_id: str, sys: str, user_msg: str
+        ) -> Optional[Tuple[str, List[str]]]:
+            """Call API, parse JSON (retry up to JSON_RETRIES on decode fail). Return (main_text, glossary) or None."""
+            for json_try in range(JSON_RETRIES + 1):
+                try:
+                    out = await self._call_chapter_once(model_id, sys, user_msg)
+                except Exception as e:
+                    if not _is_retryable_error(e):
+                        raise
+                    if json_try < JSON_RETRIES:
+                        logger.warning("Chapter call failed, retrying for JSON (%s/%s)", json_try + 1, JSON_RETRIES)
+                        continue
+                    raise
+                data = _parse_diglot_json(out)
+                if data:
+                    return data
+                if json_try < JSON_RETRIES:
+                    logger.warning("Invalid JSON, retrying (%s/%s)", json_try + 1, JSON_RETRIES)
+            return None
+
+        def _check_and_assemble(
+            main_text: str, glossary: List[str], target_pct: float
+        ) -> Optional[str]:
+            """Validate length and (optionally) %; return assembled chapter or None."""
             if not _output_length_ok(html, main_text):
                 logger.warning(
                     "Chapter main_text too short (<%s%% of original), retrying or using fallback",
                     int(MIN_OUTPUT_LENGTH_RATIO * 100),
                 )
                 return None
+            actual_pct = _count_english_percent(main_text, use_uppercase)
+            if actual_pct is not None and abs(actual_pct - target_pct) > 10:
+                return None  # caller will retry with % addendum
             return _assemble_chapter_from_json(main_text, glossary, use_uppercase)
+
+        target_pct = float(target_percent)
 
         # Tier 1: selected model, 3 attempts, 5s delay
         for attempt in range(TIER1_ATTEMPTS):
             try:
-                out = await self._call_chapter_once(self.model, system, user)
-                assembled = _try_parse_and_assemble(out)
+                current_user = user
+                data = await _try_one(self.model, system, current_user)
+                if not data:
+                    continue
+                main_text, glossary = data
+                assembled = _check_and_assemble(main_text, glossary, target_pct)
                 if assembled:
                     return assembled
+                for pct_try in range(PCT_RETRIES):
+                    current_user = (
+                        user
+                        + "\n\n[CRITICAL] Last response had "
+                        + str(round(_count_english_percent(main_text, use_uppercase) or 0))
+                        + "% English in main_text. You MUST achieve exactly "
+                        + str(int(round(target_pct)))
+                        + "% in main_text."
+                    )
+                    data = await _try_one(self.model, system, current_user)
+                    if not data:
+                        break
+                    main_text, glossary = data
+                    assembled = _check_and_assemble(main_text, glossary, target_pct)
+                    if assembled:
+                        return assembled
+                if assembled is None and main_text:
+                    logger.warning(
+                        "English %% in main_text off by >10%% after retries (target %s%%)",
+                        int(round(target_pct)),
+                    )
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
@@ -488,10 +540,30 @@ class OpenRouterTranslator:
         # Tier 2: gpt-4o-mini (first fallback), 2 attempts
         for attempt in range(TIER2_ATTEMPTS):
             try:
-                out = await self._call_chapter_once(TIER2_MODEL, system, user)
-                assembled = _try_parse_and_assemble(out)
+                current_user = user
+                data = await _try_one(TIER2_MODEL, system, current_user)
+                if not data:
+                    continue
+                main_text, glossary = data
+                assembled = _check_and_assemble(main_text, glossary, target_pct)
                 if assembled:
                     return assembled
+                for pct_try in range(PCT_RETRIES):
+                    current_user = (
+                        user
+                        + "\n\n[CRITICAL] Last response had "
+                        + str(round(_count_english_percent(main_text, use_uppercase) or 0))
+                        + "% English in main_text. You MUST achieve exactly "
+                        + str(int(round(target_pct)))
+                        + "% in main_text."
+                    )
+                    data = await _try_one(TIER2_MODEL, system, current_user)
+                    if not data:
+                        break
+                    main_text, glossary = data
+                    assembled = _check_and_assemble(main_text, glossary, target_pct)
+                    if assembled:
+                        return assembled
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
@@ -500,10 +572,30 @@ class OpenRouterTranslator:
         # Tier 3: gemini-2.0-flash (second fallback), 2 attempts
         for attempt in range(TIER3_ATTEMPTS):
             try:
-                out = await self._call_chapter_once(TIER3_MODEL, system, user)
-                assembled = _try_parse_and_assemble(out)
+                current_user = user
+                data = await _try_one(TIER3_MODEL, system, current_user)
+                if not data:
+                    continue
+                main_text, glossary = data
+                assembled = _check_and_assemble(main_text, glossary, target_pct)
                 if assembled:
                     return assembled
+                for pct_try in range(PCT_RETRIES):
+                    current_user = (
+                        user
+                        + "\n\n[CRITICAL] Last response had "
+                        + str(round(_count_english_percent(main_text, use_uppercase) or 0))
+                        + "% English in main_text. You MUST achieve exactly "
+                        + str(int(round(target_pct)))
+                        + "% in main_text."
+                    )
+                    data = await _try_one(TIER3_MODEL, system, current_user)
+                    if not data:
+                        break
+                    main_text, glossary = data
+                    assembled = _check_and_assemble(main_text, glossary, target_pct)
+                    if assembled:
+                        return assembled
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
