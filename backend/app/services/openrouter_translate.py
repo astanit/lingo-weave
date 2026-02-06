@@ -62,6 +62,15 @@ def _is_model_not_found_error(exc: Exception) -> bool:
 
 MIN_OUTPUT_LENGTH_RATIO = 0.8  # Reject if AI returns less than 80% of original length
 
+# English level (A1–C1): instruction snippet for the system prompt
+LEVEL_INSTRUCTIONS = {
+    "A1": "Focus only on basic, common vocabulary (objects, simple actions). Ignore complex words.",
+    "A2": "Focus only on basic, common vocabulary (objects, simple actions). Ignore complex words.",
+    "B1": "Ignore basic vocabulary. Target more abstract and descriptive words, complex verbs, and common idioms.",
+    "B2": "Ignore basic vocabulary. Target more abstract and descriptive words, complex verbs, and common idioms.",
+    "C1": "Ignore common and intermediate words. Only translate rare, literary, academic, or highly sophisticated English words to challenge the reader.",
+}
+
 DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher.
 
 1. Translate the text according to the target percentage ({target_percent}%).
@@ -74,6 +83,7 @@ Rules for translation:
 - FORMAT: Continue to wrap ALL English words in <b>tags</b> (e.g., <b>word</b>) to highlight them for the reader.
 - Replace approximately {target_words_count} words. Text length: {total_words} words.
 - FULL TEXT ONLY: Return the ENTIRE text. No skipping sentences or summarizing.
+- LEVEL: Your target audience has an English level of {target_level}. Select words appropriate for this level to maximize their learning. {target_level_instruction}
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
@@ -91,6 +101,7 @@ STORY TEXT (after the glossary):
 - STRICT: Do NOT use any HTML tags (like <b>), UPPERCASE, or special symbols (like asterisks) to highlight English words in the story text. Integrate English words into the Russian sentences as plain, seamless text. The reader should distinguish them only by the language itself.
 - DISTRIBUTION: Scatter words RANDOMLY. Replace approximately {target_words_count} words. Text length: {total_words} words.
 - FULL TEXT ONLY: Return the ENTIRE story after the glossary. No skipping or summarizing.
+- LEVEL: Your target audience has an English level of {target_level}. Select words appropriate for this level to maximize their learning. {target_level_instruction}
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
@@ -339,12 +350,17 @@ class OpenRouterTranslator:
         previous_vocab: Optional[Dict[str, str]] = None,
         already_glossaried: Optional[set] = None,
         use_uppercase: bool = False,
+        target_level: Optional[str] = None,
     ) -> str:
         """
-        Process a full chapter with Diglot Weave. If use_uppercase=True (for .txt), output is plain text with UPPERCASE English words, no HTML.
+        Process a full chapter with Diglot Weave. target_level: A1, A2, B1, B2, C1 (default B1).
         """
         if target_words_count <= 0:
             return html
+
+        level_key = (target_level or "B1").upper()
+        target_level_instruction = LEVEL_INSTRUCTIONS.get(level_key, LEVEL_INSTRUCTIONS["B1"])
+        target_level_display = level_key
 
         if previous_vocab and len(previous_vocab) > 0:
             prev_list = " ".join(f"{ru}→{en}" for ru, en in list(previous_vocab.items())[:80])
@@ -369,6 +385,8 @@ class OpenRouterTranslator:
                 target_percent=int(round(target_percent)),
                 previous_vocab_instruction=previous_vocab_instruction,
                 already_glossaried_instruction=already_glossaried_instruction,
+                target_level=target_level_display,
+                target_level_instruction=target_level_instruction,
             )
             user = (
                 f"Process the following text. Add 'Chapter Vocabulary' (10-15 words, <b> allowed in glossary only), then <hr />, then the story. "
@@ -382,6 +400,8 @@ class OpenRouterTranslator:
                 target_percent=int(round(target_percent)),
                 previous_vocab_instruction=previous_vocab_instruction,
                 already_glossaried_instruction=already_glossaried_instruction,
+                target_level=target_level_display,
+                target_level_instruction=target_level_instruction,
             )
             if ratio < 0.30:
                 system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."

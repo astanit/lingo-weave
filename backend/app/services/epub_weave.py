@@ -101,10 +101,12 @@ async def _weave_chapter_async(
     previous_vocab: Optional[Dict[str, str]] = None,
     already_glossaried: Optional[Set[str]] = None,
     use_uppercase: bool = False,
+    target_level: Optional[str] = None,
 ) -> str:
     """
     Diglot Weave: word count before AI call; then non-blocking API.
     use_uppercase=True for .txt: glossary (with <b>) at top, then plain story (no highlighting).
+    target_level: A1, A2, B1, B2, C1 for word-selection difficulty.
     """
     total_words = count_chapter_words(html)
     target_words_count = max(0, int(round(total_words * ratio)))
@@ -119,6 +121,7 @@ async def _weave_chapter_async(
         previous_vocab=previous_vocab or {},
         already_glossaried=already_glossaried,
         use_uppercase=use_uppercase,
+        target_level=target_level,
     )
 
 
@@ -131,10 +134,11 @@ async def process_one_segment_async(
     global_vocab: Dict[str, str],
     already_glossaried: Set[str],
     use_uppercase: bool = False,
+    target_level: Optional[str] = None,
 ) -> str:
     """
     Process one segment (virtual chapter) with Diglot Weave. Updates global_vocab and already_glossaried from glossary.
-    use_uppercase=True for .txt: glossary at top + plain story. Returns weaved HTML or mixed (glossary + story).
+    use_uppercase=True for .txt: glossary at top + plain story. target_level: A1–C1.
     """
     ratio = chapter_target_ratio(segment_index, total_segments)
     target_percent = round(ratio * 100)
@@ -148,6 +152,7 @@ async def process_one_segment_async(
         previous_vocab=global_vocab,
         already_glossaried=already_glossaried,
         use_uppercase=use_uppercase,
+        target_level=target_level,
     )
     extract_glossary_to_vocab(weaved, global_vocab, already_glossaried=already_glossaried)
     return weaved
@@ -194,6 +199,7 @@ async def _process_single_chapter_async(
     options: WeaveOptions,
     previous_vocab: Optional[Dict[str, str]] = None,
     already_glossaried: Optional[Set[str]] = None,
+    target_level: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Process one chapter (non-blocking). Returns (item_id, html). Uses previous_vocab for consistency.
@@ -218,6 +224,7 @@ async def _process_single_chapter_async(
             target_percent=target_percent,
             previous_vocab=previous_vocab,
             already_glossaried=already_glossaried,
+            target_level=target_level,
         )
         if weaved is None or not isinstance(weaved, str):
             weaved = original
@@ -238,6 +245,7 @@ async def _weave_epub_async(
     options: WeaveOptions,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
+    target_level: Optional[str] = None,
 ) -> Tuple[str, str]:
     options = options or WeaveOptions()
     out_root = Path(outputs_dir)
@@ -275,6 +283,7 @@ async def _weave_epub_async(
                 options,
                 previous_vocab=global_vocab,
                 already_glossaried=already_glossaried,
+                target_level=target_level,
             )
             if html is not None and isinstance(html, str):
                 translated_items[rid] = html
@@ -361,8 +370,9 @@ async def run_weave_epub_async(
     options: WeaveOptions | None = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
+    target_level: Optional[str] = None,
 ) -> Tuple[str, str, int, int]:
-    """Async entry point for EPUB weave. Returns (job_id, output_path, failed_count, total_chapters)."""
+    """Async entry point for EPUB weave. Returns (job_id, output_path, failed_count, total_chapters). target_level: A1–C1."""
     options = options or WeaveOptions()
     return await _weave_epub_async(
         input_epub_path=input_epub_path,
@@ -370,4 +380,5 @@ async def run_weave_epub_async(
         options=options,
         progress_callback=progress_callback,
         model_id=model_id,
+        target_level=target_level,
     )
