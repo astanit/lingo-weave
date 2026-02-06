@@ -197,27 +197,37 @@ class OpenRouterTranslator:
             mapping.update(self.translate_words_ru_to_en(buf))
         return mapping
 
-    TRIAL_SYSTEM_PROMPT = (
-        "Translate exactly 10% of this short fragment into English. "
-        "Bold English words: <b>word</b>. Keep Cyrillic names. Focus on common nouns. "
-        "Return the full fragment with about 10% of words translated and wrapped in <b>. "
-        "Preserve all original structure and line breaks. No glossary. Output only the translated fragment."
+    TRIAL_SYSTEM_PROMPT_40 = (
+        "You are a 'Diglot Weave' generator. This is a FREE SAMPLE. "
+        "Your task is to replace exactly 40% of the words in this text with English. "
+        "Rules:\n"
+        "1. Use common English words.\n"
+        "2. Bold every English word: <b>word</b>.\n"
+        "3. Keep names in Cyrillic.\n"
+        "4. Make the translation very obvious and frequent.\n"
+        "Return ONLY the transformed text. No glossary. Preserve structure and line breaks."
     )
 
-    async def translate_trial_fragment(
-        self, text: str, model_id: Optional[str] = None
+    TRIAL_SYSTEM_PROMPT_SIMPLE = (
+        "Replace about 40% of Russian words with English. Wrap each English word in <b>word</b>. "
+        "Keep Cyrillic names unchanged. Output only the text."
+    )
+
+    async def translate_simple(
+        self, snippet_text: str, target_percent: int = 40, model_id: Optional[str] = None
     ) -> str:
-        """Translate a short trial snippet with fixed 10% target. Returns translated text or original on failure."""
-        if not (text or text.strip()):
-            return text or ""
+        """Standalone trial: 40% Diglot Weave. If result has no <b> tags, retry with gpt-4o-mini. Returns UTF-8 safe str."""
+        if not (snippet_text or snippet_text.strip()):
+            return snippet_text or ""
+        text = snippet_text.strip()
         model = model_id or self.model
         try:
-            print(f"DEBUG: Using model slug '{model}' for trial fragment")
+            print(f"DEBUG: Using model slug '{model}' for trial (target_percent={target_percent})")
             resp = await self.async_client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": self.TRIAL_SYSTEM_PROMPT},
-                    {"role": "user", "content": text.strip()},
+                    {"role": "system", "content": self.TRIAL_SYSTEM_PROMPT_40},
+                    {"role": "user", "content": text},
                 ],
                 temperature=0.3,
             )
@@ -227,9 +237,26 @@ class OpenRouterTranslator:
             if content.startswith("```"):
                 content = re.sub(r"^```(?:html)?\s*", "", content)
                 content = re.sub(r"\s*```$", "", content)
-            return content.strip()
+            content = content.strip()
+            if "<b>" not in content and "<b " not in content:
+                print("DEBUG: Trial result has no <b> tags, retrying with gpt-4o-mini")
+                try:
+                    resp2 = await self.async_client.chat.completions.create(
+                        model=FALLBACK_MODEL,
+                        messages=[
+                            {"role": "system", "content": self.TRIAL_SYSTEM_PROMPT_SIMPLE},
+                            {"role": "user", "content": text},
+                        ],
+                        temperature=0.3,
+                    )
+                    content2 = (resp2.choices[0].message.content or "").strip()
+                    if content2 and ("<b>" in content2 or "<b " in content2):
+                        return content2.strip()
+                except Exception as e2:
+                    logger.warning("Trial retry failed: %s", e2)
+            return content
         except Exception as e:
-            logger.warning("Trial fragment translation failed: %s", e)
+            logger.warning("Trial translate_simple failed: %s", e)
             return text
 
     async def _call_chapter_once(

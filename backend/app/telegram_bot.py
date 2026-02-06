@@ -151,6 +151,39 @@ def _count_words_in_file(input_path: str, ext: str) -> int:
     return 0
 
 
+def _read_first_chars(input_path: str, ext: str, limit: int) -> str:
+    """Read first `limit` characters from the file as UTF-8. Used for standalone trial snippet."""
+    try:
+        if ext == ".txt":
+            with open(input_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read(limit + 500)[:limit]
+        if ext == ".epub":
+            book = epub.read_epub(input_path)
+            for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+                if isinstance(item, epub.EpubHtml):
+                    raw = item.get_content()
+                    if raw:
+                        return raw.decode("utf-8", errors="replace")[:limit]
+            return ""
+        if ext == ".fb2":
+            parser = etree.XMLParser(recover=True)
+            tree = etree.parse(input_path, parser)
+            root = tree.getroot()
+            ns = "http://www.gribuser.ru/xml/fictionbook/2.0"
+            parts = []
+            n = 0
+            for p in root.iter(f"{{{ns}}}p"):
+                text = (p.text or "") + "".join((e.text or "") + (e.tail or "") for e in p)
+                parts.append(text)
+                n += len(text)
+                if n >= limit:
+                    break
+            return ("\n\n".join(parts))[:limit]
+    except Exception as e:
+        logger.warning("_read_first_chars failed: %s", e)
+    return ""
+
+
 def _create_sample_file(input_path: str, ext: str) -> Optional[Path]:
     """Create a sample file: first 2000 chars (TXT/FB2) or first chapter (EPUB). Returns path or None."""
     try:
@@ -219,11 +252,11 @@ async def _run_trial_then_upsell(
     file_name: str,
     user_id: int,
 ):
-    """Create sample, translate with Gemini, send snippet, then show 4-model upsell with dynamic pricing."""
+    """Standalone trial: first 2000 chars, 40%% Diglot Weave, then 4-model upsell with dynamic pricing."""
     word_count = _count_words_in_file(str(full_path), ext)
-    sample_path = _create_sample_file(str(full_path), ext)
-    if not sample_path or not sample_path.exists():
-        await bot.send_message(chat_id, "Не удалось подготовить пробный фрагмент. Отправьте файл ещё раз или выберите модель ниже.")
+    snippet_text = _read_first_chars(str(full_path), ext, SAMPLE_CHAR_LIMIT)
+    if not snippet_text or not snippet_text.strip():
+        await bot.send_message(chat_id, "Не удалось прочитать фрагмент. Отправьте файл ещё раз или выберите модель ниже.")
         choice_id = uuid.uuid4().hex
         _pending_choice[choice_id] = {
             "file_id": file_id,
@@ -236,44 +269,25 @@ async def _run_trial_then_upsell(
         msg = f"В вашей книге {word_count} слов. Выберите модель для полного перевода:" if word_count > 0 else "Чтобы перевести всю книгу целиком, выберите качество:"
         await bot.send_message(chat_id, msg, reply_markup=_model_choice_keyboard(choice_id, word_count or 0))
         return
-    sample_ext = sample_path.suffix.lower()
-    if sample_ext not in ALLOWED_EXTENSIONS:
-        sample_ext = ".txt"
-    # Read sample as UTF-8 for AI (TXT/FB2 sample is .txt; EPUB sample is .epub — extract first chapter text)
-    sample_content = ""
-    try:
-        if sample_path.suffix.lower() == ".txt":
-            sample_content = sample_path.read_text(encoding="utf-8", errors="replace")
-        else:
-            book = epub.read_epub(str(sample_path))
-            for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-                if isinstance(item, epub.EpubHtml):
-                    raw = item.get_content()
-                    if raw:
-                        sample_content = raw.decode("utf-8", errors="replace")
-                        break
-    except Exception as e:
-        logger.warning("Trial sample read failed: %s", e)
-    try:
-        os.remove(sample_path)
-    except OSError:
-        pass
+
+    await bot.send_message(chat_id, "Готовлю ваш пробный фрагмент (40% погружения)... ⏳")
+    from app.services.openrouter_translate import OpenRouterTranslator
+    translator = OpenRouterTranslator(model=TRIAL_MODEL)
+    translated_snippet = await translator.translate_simple(snippet_text, target_percent=40, model_id=TRIAL_MODEL)
+    if isinstance(translated_snippet, bytes):
+        translated_snippet = translated_snippet.decode("utf-8", errors="replace")
+    translated_snippet = (translated_snippet or "").strip()
+    print(f"DEBUG: Trial snippet length: {len(snippet_text)}, Target %: 40, Result length: {len(translated_snippet)}")
+
     choice_id = uuid.uuid4().hex
-    target_words_count = max(1, _count_words_in_text(sample_content) * 10 // 100)
-    print(f"DEBUG: Processing trial snippet for user {user_id}. Target words: {target_words_count}")
-    translated = ""
-    if sample_content.strip():
-        from app.services.openrouter_translate import OpenRouterTranslator
-        translator = OpenRouterTranslator(model=TRIAL_MODEL)
-        translated = await translator.translate_trial_fragment(sample_content, model_id=TRIAL_MODEL)
-    if not translated or not translated.strip() or translated.strip() == sample_content.strip():
+    if not translated_snippet or translated_snippet == snippet_text.strip():
         await bot.send_message(
             chat_id,
             "⚠️ Не удалось создать перевод фрагмента, но вы можете заказать полный перевод ниже.",
         )
     else:
         out_path = UPLOADS_DIR / f"trial_out_{uuid.uuid4().hex}.txt"
-        out_path.write_text(translated, encoding="utf-8")
+        out_path.write_text(translated_snippet, encoding="utf-8")
         try:
             doc = FSInputFile(out_path, filename="SAMPLE_LingoWeave.txt")
             await bot.send_document(chat_id, doc)
@@ -286,7 +300,7 @@ async def _run_trial_then_upsell(
         f"В вашей книге {word_count} слов. Выберите модель для полного перевода:"
         if word_count > 0 else "Выберите модель для полного перевода:"
     )
-    if translated and translated.strip() and translated.strip() != sample_content.strip():
+    if translated_snippet and translated_snippet != snippet_text.strip():
         upsell_msg = "👆 Это пример перевода вашей книги. " + upsell_msg
     await bot.send_message(chat_id, upsell_msg, reply_markup=_model_choice_keyboard(choice_id, word_count))
     _pending_choice[choice_id] = {
