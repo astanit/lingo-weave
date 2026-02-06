@@ -65,40 +65,36 @@ MIN_OUTPUT_LENGTH_RATIO = 0.8  # Reject if AI returns less than 80% of original 
 DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher.
 
 1. Translate the text according to the target percentage ({target_percent}%).
-2. Create a 'New Vocabulary' list for the start of this chapter.
-   - Select 10-15 most sophisticated or important English words from your translation. Do NOT include every translated word.
-   - FILTERING: Skip very simple words (e.g. house, man, go, good, big) in the glossary even if they appear in the text. Focus on difficult, rare, or meaning-heavy words.
-   - Format: <h3>Chapter Vocabulary</h3><ul><li><b>word</b> — перевод</li>...</ul><hr/>
-   - CRITICAL: Focus on interesting verbs and adjectives. Skip basic nouns if the list is too long.
-   - UNIQUENESS: Do not include words that have already appeared in glossaries of previous chapters. Every glossary should feel like a "New Words" list.
-   - If no suitable words (e.g. chapter too short), you may omit the glossary or use fewer items.
-3. Ensure the glossary words match exactly how they are used in the text.
+2. Create a 'Chapter Vocabulary' list at the start of this chapter: 10-15 unique, interesting words. Do not repeat words from previous chapters' glossaries. Format: <h3>Chapter Vocabulary</h3><ul><li><b>word</b> — перевод</li>...</ul><hr/>
+   - Skip very simple words (e.g. house, man, go, good, big). Focus on difficult, rare, or meaning-heavy words. Glossary words must match how they appear in the text.
+3. PROPER NOUNS: Always keep names, cities, and places in original Russian Cyrillic (e.g. Амалия, Урсула, Лондон). Never translate or transliterate them.
 
 Rules for translation:
 - DISTRIBUTION: Scatter words RANDOMLY. Do not translate only the beginning of sentences.
-- PROPER NOUNS: NEVER translate, transliterate, or change the script of Russian proper names, cities, or places. Keep all Russian names and locations in their original Cyrillic form. Do not touch them. Examples: "Амалия" must remain "Амалия" (NOT "Amalia"); "Джулиан" must remain "Джулиан".
-- FORMAT: Wrap every English word in the body in <b>tags</b>. Example: <b>carriage</b>.
+- FORMAT: Continue to wrap ALL English words in <b>tags</b> (e.g., <b>word</b>) to highlight them for the reader.
 - Replace approximately {target_words_count} words. Text length: {total_words} words.
-- FULL TEXT ONLY: You MUST return the ENTIRE text with English words woven in. It is forbidden to skip sentences, paragraphs, or return a summary. Every sentence from the original must appear in your output.
+- FULL TEXT ONLY: Return the ENTIRE text. No skipping sentences or summarizing.
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
 ASSEMBLY: Output must be [GLOSSARY] + <hr /> + [TRANSLATED TEXT]. Preserve all HTML (e.g. <p>, <div>, <br>). Respond with ONLY the full HTML. No markdown."""
 
-# For .txt: no HTML, highlight English with UPPERCASE
-DIGLOT_SYSTEM_PROMPT_TXT = """You are a 'Diglot Weave' teacher for PLAIN TEXT output.
+# For .txt: Chapter Vocabulary (may use <b>) at top; story text = plain, no highlighting
+DIGLOT_SYSTEM_PROMPT_TXT = """You are a 'Diglot Weave' teacher for .txt output (clean integration).
 
 1. Translate the text according to the target percentage ({target_percent}%).
-2. DO NOT use <b> tags or any HTML. Instead, write all English words in UPPERCASE (e.g., WORD) to highlight them.
-3. Rules for translation:
-   - DISTRIBUTION: Scatter words RANDOMLY. Do not translate only the beginning of sentences.
-   - PROPER NOUNS: NEVER translate or transliterate Russian proper names, cities, or places. Keep them in Cyrillic.
-   - Replace approximately {target_words_count} words. Text length: {total_words} words.
-   - FULL TEXT ONLY: Return the ENTIRE text. No glossary, no HTML, no markdown. Plain text only. English words in UPPERCASE.
+2. Include a 'Chapter Vocabulary' at the TOP: 10-15 unique, interesting English words. Exception: in this glossary section you MAY use <b>word</b> for clarity. Format: <h3>Chapter Vocabulary</h3><ul><li><b>word</b> — перевод</li>...</ul><hr/>
+   Do not repeat words from previous chapters' glossaries.
+3. PROPER NOUNS: Always keep names, cities, and places in original Russian Cyrillic (e.g. Амалия, Урсула, Лондон). Never translate or transliterate them.
+
+STORY TEXT (after the glossary):
+- STRICT: Do NOT use any HTML tags (like <b>), UPPERCASE, or special symbols (like asterisks) to highlight English words in the story text. Integrate English words into the Russian sentences as plain, seamless text. The reader should distinguish them only by the language itself.
+- DISTRIBUTION: Scatter words RANDOMLY. Replace approximately {target_words_count} words. Text length: {total_words} words.
+- FULL TEXT ONLY: Return the ENTIRE story after the glossary. No skipping or summarizing.
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 
-OUTPUT: Respond with ONLY the plain text. No glossary section. No <hr />. No HTML/CSS. English words in UPPERCASE."""
+OUTPUT: [GLOSSARY with <b> allowed] + <hr /> + [STORY in plain text only — no HTML, no UPPERCASE, no asterisks]."""
 
 
 class OpenRouterTranslator:
@@ -228,10 +224,10 @@ class OpenRouterTranslator:
         "Keep Cyrillic names unchanged. Output only the text."
     )
 
-    TRIAL_SYSTEM_PROMPT_UPPERCASE = (
-        "Replace about 40% of Russian words with English. DO NOT use <b> or any HTML. "
-        "Write every English word in UPPERCASE (e.g., WORD). Keep Cyrillic names unchanged. "
-        "Output ONLY plain text. No HTML, no markdown."
+    TRIAL_SYSTEM_PROMPT_PLAIN = (
+        "Replace about 40% of Russian words with English. Do NOT use any HTML tags (like <b>), UPPERCASE, or special symbols (like asterisks) to highlight English words. "
+        "Integrate English words into the Russian sentences as plain, seamless text. The reader should distinguish them only by the language itself. "
+        "Keep Cyrillic names unchanged (e.g. Амалия, Лондон). Output only the transformed text."
     )
 
     async def translate_simple(
@@ -241,13 +237,13 @@ class OpenRouterTranslator:
         model_id: Optional[str] = None,
         highlight_style: str = "BOLD_TAGS",
     ) -> str:
-        """Standalone trial. highlight_style: 'UPPERCASE' for .txt (plain text), 'BOLD_TAGS' for .epub/.fb2. Returns UTF-8 safe str."""
+        """Standalone trial. highlight_style: 'PLAIN' for .txt (no highlighting), 'BOLD_TAGS' for .epub/.fb2. Returns UTF-8 safe str."""
         if not (snippet_text or snippet_text.strip()):
             return snippet_text or ""
         text = snippet_text.strip()
         model = model_id or self.model
-        use_uppercase = (highlight_style or "BOLD_TAGS").upper() == "UPPERCASE"
-        system_prompt = self.TRIAL_SYSTEM_PROMPT_UPPERCASE if use_uppercase else self.TRIAL_SYSTEM_PROMPT_40
+        use_plain = (highlight_style or "BOLD_TAGS").upper() in ("UPPERCASE", "PLAIN")
+        system_prompt = self.TRIAL_SYSTEM_PROMPT_PLAIN if use_plain else self.TRIAL_SYSTEM_PROMPT_40
         try:
             print(f"DEBUG: Using model slug '{model}' for trial (target_percent={target_percent}, highlight_style={highlight_style})")
             resp = await self.async_client.chat.completions.create(
@@ -265,16 +261,16 @@ class OpenRouterTranslator:
                 content = re.sub(r"^```(?:html)?\s*", "", content)
                 content = re.sub(r"\s*```$", "", content)
             content = content.strip()
-            if use_uppercase:
-                # For TXT: accept plain text; optional retry if no UPPERCASE English words
-                if re.search(r"\b[A-Z]{2,}\b", content):
+            if use_plain:
+                # For TXT: accept plain text (optional retry if no Latin/English)
+                if re.search(r"[a-zA-Z]{2,}", content):
                     return content
-                print("DEBUG: Trial UPPERCASE result has no obvious UPPERCASE words, retrying with gpt-4o-mini")
+                print("DEBUG: Trial PLAIN result has no obvious English words, retrying with gpt-4o-mini")
                 try:
                     resp2 = await self.async_client.chat.completions.create(
                         model=FALLBACK_MODEL,
                         messages=[
-                            {"role": "system", "content": self.TRIAL_SYSTEM_PROMPT_UPPERCASE},
+                            {"role": "system", "content": self.TRIAL_SYSTEM_PROMPT_PLAIN},
                             {"role": "user", "content": text},
                         ],
                         temperature=0.3,
@@ -375,8 +371,8 @@ class OpenRouterTranslator:
                 already_glossaried_instruction=already_glossaried_instruction,
             )
             user = (
-                f"Process the following text. Replace approximately {target_words_count} words with English in UPPERCASE. "
-                "Output ONLY plain text. No HTML, no glossary, no <b> tags. English words in UPPERCASE.\n\n"
+                f"Process the following text. Add 'Chapter Vocabulary' (10-15 words, <b> allowed in glossary only), then <hr />, then the story. "
+                f"Replace approximately {target_words_count} words with English. In the STORY part use NO HTML, no UPPERCASE, no asterisks — plain seamless text only.\n\n"
                 + html
             )
         else:

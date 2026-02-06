@@ -47,12 +47,11 @@ class WeaveOptions:
 
 
 def chapter_target_ratio(chapter_index: int, total_chapters: int) -> float:
-    """Target English percentage: Ch1 ~5%, middle ~50%, last 100%. Returns ratio in [0.05, 1.0]."""
+    """Target English percentage: Ch1 20%, linear to last 100%. Formula: 20 + (index/(n-1))*80."""
     if total_chapters <= 1:
         return 1.0
-    # target_percent = 5 + (current_chapter_index / total_chapters) * 95 -> Ch1 5%, last 100%
-    target_percent = 5 + (chapter_index / (total_chapters - 1)) * 95
-    return max(0.05, min(1.0, target_percent / 100.0))
+    target_percent = 20 + (chapter_index / (total_chapters - 1)) * 80
+    return max(0.20, min(1.0, target_percent / 100.0))
 
 
 def count_chapter_words(html: str) -> int:
@@ -105,7 +104,7 @@ async def _weave_chapter_async(
 ) -> str:
     """
     Diglot Weave: word count before AI call; then non-blocking API.
-    use_uppercase=True for .txt: plain text output, English in UPPERCASE, no HTML/glossary.
+    use_uppercase=True for .txt: glossary (with <b>) at top, then plain story (no highlighting).
     """
     total_words = count_chapter_words(html)
     target_words_count = max(0, int(round(total_words * ratio)))
@@ -134,8 +133,8 @@ async def process_one_segment_async(
     use_uppercase: bool = False,
 ) -> str:
     """
-    Process one segment (virtual chapter) with Diglot Weave. When use_uppercase=False, updates global_vocab and already_glossaried.
-    use_uppercase=True for .txt: plain text output, no glossary. Returns weaved HTML or plain text.
+    Process one segment (virtual chapter) with Diglot Weave. Updates global_vocab and already_glossaried from glossary.
+    use_uppercase=True for .txt: glossary at top + plain story. Returns weaved HTML or mixed (glossary + story).
     """
     ratio = chapter_target_ratio(segment_index, total_segments)
     target_percent = round(ratio * 100)
@@ -150,8 +149,7 @@ async def process_one_segment_async(
         already_glossaried=already_glossaried,
         use_uppercase=use_uppercase,
     )
-    if not use_uppercase:
-        extract_glossary_to_vocab(weaved, global_vocab, already_glossaried=already_glossaried)
+    extract_glossary_to_vocab(weaved, global_vocab, already_glossaried=already_glossaried)
     return weaved
 
 
