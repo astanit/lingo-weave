@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 
 from openai import AsyncOpenAI, OpenAI
 
@@ -48,74 +48,6 @@ def _output_length_ok(original_html: str, result_content: str) -> bool:
     return len(result_content) >= MIN_OUTPUT_LENGTH_RATIO * len(original_html)
 
 
-def _strip_json_fence(content: str) -> str:
-    """Remove ```json and ``` wrapper if present."""
-    s = content.strip()
-    if s.startswith("```"):
-        s = re.sub(r"^```(?:json)?\s*", "", s)
-        s = re.sub(r"\s*```$", "", s)
-    return s.strip()
-
-
-def _parse_diglot_json(content: str) -> Optional[Tuple[str, List[str]]]:
-    """
-    Parse LLM response as JSON. Returns (main_text, glossary_list) or None if invalid.
-    glossary_list items are strings like "word: перевод".
-    """
-    if not content or not content.strip():
-        return None
-    s = _strip_json_fence(content)
-    try:
-        data = json.loads(s)
-    except json.JSONDecodeError as e:
-        logger.warning("Diglot JSON parse failed: %s. Will retry or fallback.", e)
-        return None
-    if not isinstance(data, dict):
-        return None
-    main_text = data.get("main_text")
-    glossary = data.get("glossary")
-    if main_text is None or not isinstance(main_text, str):
-        return None
-    if glossary is None:
-        glossary = []
-    if not isinstance(glossary, list):
-        glossary = [str(g) for g in glossary] if hasattr(glossary, "__iter__") else []
-    glossary = [str(item).strip() for item in glossary if item]
-    return (main_text.strip(), glossary)
-
-
-def _count_english_percent(main_text: str, use_uppercase: bool) -> Optional[float]:
-    """
-    Count percentage of English/highlighted words in main_text only.
-    EPUB: count <b>...</b> tags. TXT: count Latin-letter words (2+ chars).
-    Returns 0-100 or None if no words.
-    """
-    if not main_text or not main_text.strip():
-        return None
-    # Total word-like tokens (letters/numbers)
-    all_tokens = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", main_text)
-    total = len(all_tokens)
-    if total == 0:
-        return None
-    if use_uppercase:
-        # Plain text: count Latin-letter words (2+ chars)
-        english = len([t for t in all_tokens if len(t) >= 2 and re.match(r"^[a-zA-Z]+$", t)])
-    else:
-        # HTML: count <b>...</b> content as English words
-        english = len(re.findall(r"<b[^>]*>([^<]+)</b>", main_text, re.IGNORECASE))
-    return 100.0 * english / total if total else None
-
-
-def _assemble_chapter_from_json(main_text: str, glossary: List[str], _use_uppercase: bool) -> str:
-    """
-    Assemble final chapter: main_text + "\n\nGlossary:\n" + "\n".join(glossary).
-    Glossary is kept separate and appended as plain text.
-    """
-    if not glossary:
-        return main_text
-    return main_text + "\n\nGlossary:\n" + "\n".join(glossary)
-
-
 def _is_model_not_found_error(exc: Exception) -> bool:
     """True if API returned 404 or 'Model not found' (for sync fallback)."""
     msg = str(exc).lower()
@@ -130,37 +62,15 @@ def _is_model_not_found_error(exc: Exception) -> bool:
 
 MIN_OUTPUT_LENGTH_RATIO = 0.8  # Reject if AI returns less than 80% of original length
 
-# JSON output: % calculated ONLY on main_text; glossary generated separately. Use {{ }} for literal braces in format().
-DIGLOT_SYSTEM_PROMPT = """You are a 'Diglot Weave' teacher. You MUST respond with ONLY valid JSON.
-
-Chain-of-Thought (follow in order):
-1. Read the input HTML body. Count total words in the BODY only (ignore any existing glossary).
-2. Compute target: exactly {target_percent}% of those words must become English in main_text. That is about {target_words_count} words. Text length: {total_words} words (body only).
-3. MAIN TEXT: Replace exactly that many words in the BODY. Percentage applies ONLY to main_text — do NOT include the glossary in word count or % calculation. Preserve all HTML (e.g. <p>, <div>, <br>). Wrap every English word in <b>tags</b> (e.g., <b>word</b>). Scatter words RANDOMLY. Return the ENTIRE body; no skipping or summarizing.
-4. GLOSSARY: From the English words you put in main_text, build a SEPARATE list: 10-15 unique entries. Format each as "word: перевод". (a) Collect replaced words from main_text; (b) Deduplicate; (c) Sort alphabetically; (d) Do not repeat words from previous chapters. Skip very simple words (house, man, go).
-5. PROPER NOUNS: Keep names, cities, places in original Russian Cyrillic (e.g. Амалия, Урсула, Лондон). Never translate them.
-6. Output ONLY the JSON object below. No markdown, no code fence, no commentary.
+# Simple diglot weave: direct text output (weave + glossary in one string). No JSON.
+DIGLOT_SYSTEM_PROMPT = """You are a Diglot Weave teacher. Rewrite the text replacing exactly {target_percent}% of words with English. Wrap every English word in <b>tags</b> (e.g. <b>word</b>). Preserve all HTML (e.g. <p>, <div>, <br>). Keep names and places in original Russian Cyrillic. At the end add: Glossary: word — перевод (one per line, 10-15 words). Return the full text + glossary in one response. No JSON, no code blocks.
 {previous_vocab_instruction}
-{already_glossaried_instruction}
+{already_glossaried_instruction}"""
 
-REMINDER: Respond with ONLY this JSON (literal braces, no extra keys):
-{{"main_text": "<p>...</p>", "glossary": ["word: перевод", "word2: перевод", ...]}}"""
-
-# For .txt: main_text is plain (no HTML); glossary separate
-DIGLOT_SYSTEM_PROMPT_TXT = """You are a 'Diglot Weave' teacher for .txt output. You MUST respond with ONLY valid JSON.
-
-Chain-of-Thought (follow in order):
-1. Read the input text. Count total words in the BODY only.
-2. Compute target: exactly {target_percent}% of those words must become English in main_text. That is about {target_words_count} words. Text length: {total_words} words (body only).
-3. MAIN TEXT: Replace exactly that many words. Percentage applies ONLY to main_text — do NOT include the glossary in word count or % calculation. Do NOT use HTML, UPPERCASE, or asterisks. Integrate English as plain, seamless text. Scatter RANDOMLY. Return the ENTIRE story; no skipping or summarizing.
-4. GLOSSARY: From the English words you put in main_text, build a SEPARATE list: 10-15 unique entries. Format each as "word: перевод". (a) Collect replaced words; (b) Deduplicate; (c) Sort alphabetically; (d) Do not repeat words from previous chapters.
-5. PROPER NOUNS: Keep names, cities, places in Russian Cyrillic (e.g. Амалия, Лондон).
-6. Output ONLY the JSON object below. No markdown, no code fence, no commentary.
+# For .txt: plain text, no HTML; glossary at end
+DIGLOT_SYSTEM_PROMPT_TXT = """You are a Diglot Weave teacher for plain text. Rewrite the text replacing exactly {target_percent}% of words with English. Do NOT use HTML, UPPERCASE, or asterisks — integrate English as plain text. Keep names in Russian Cyrillic. At the end add: Glossary: word — перевод (one per line, 10-15 words). Return the full text + glossary in one response. No JSON, no code blocks.
 {previous_vocab_instruction}
-{already_glossaried_instruction}
-
-REMINDER: Respond with ONLY this JSON (literal braces, no extra keys):
-{{"main_text": "plain story text here...", "glossary": ["word: перевод", "word2: перевод", ...]}}"""
+{already_glossaried_instruction}"""
 
 
 class OpenRouterTranslator:
@@ -430,106 +340,38 @@ class OpenRouterTranslator:
 
         if use_uppercase:
             system = DIGLOT_SYSTEM_PROMPT_TXT.format(
-                total_words=total_words,
-                target_words_count=target_words_count,
                 target_percent=int(round(target_percent)),
                 previous_vocab_instruction=previous_vocab_instruction,
                 already_glossaried_instruction=already_glossaried_instruction,
             )
-            user = (
-                f"Process the following text. Replace approximately {target_words_count} words in the BODY only. "
-                "Output JSON with main_text (plain story, no HTML/UPPERCASE/asterisks) and glossary (list of 'word: перевод').\n\n"
-                + html
-            )
+            user = f"Rewrite the following text. Replace exactly {target_words_count} words (~{int(round(target_percent))}%) with English. At the end add Glossary: word — перевод.\n\n" + html
         else:
             system = DIGLOT_SYSTEM_PROMPT.format(
-                total_words=total_words,
-                target_words_count=target_words_count,
                 target_percent=int(round(target_percent)),
                 previous_vocab_instruction=previous_vocab_instruction,
                 already_glossaried_instruction=already_glossaried_instruction,
             )
             if ratio < 0.30:
-                system += "\n\n**Low immersion:** With this low percentage, prefer replacing nouns and objects so the sentence logic stays clear. Avoid 'broken English' (e.g. 'I not proud that'). Keep reading flow natural."
-            user = (
-                "Process the following HTML. Replace approximately "
-                f"{target_words_count} words in the BODY only. Reply with ONLY the JSON object (main_text + glossary).\n\n"
-                + html
-            )
+                system += "\n\n**Low immersion:** Prefer replacing nouns and objects. Keep sentences natural."
+            user = f"Rewrite the following HTML. Replace exactly {target_words_count} words (~{int(round(target_percent))}%) with English (wrap in <b>). At the end add Glossary: word — перевод.\n\n" + html
 
-        JSON_RETRIES = 2  # up to 2 retries on JSON decode failure (3 total tries)
-        PCT_RETRIES = 2  # up to 2 retries when % off by >10%
-
-        async def _try_one(
-            model_id: str, sys: str, user_msg: str
-        ) -> Optional[Tuple[str, List[str]]]:
-            """Call API, parse JSON (retry up to JSON_RETRIES on decode fail). Return (main_text, glossary) or None."""
-            for json_try in range(JSON_RETRIES + 1):
-                try:
-                    out = await self._call_chapter_once(model_id, sys, user_msg)
-                except Exception as e:
-                    if not _is_retryable_error(e):
-                        raise
-                    if json_try < JSON_RETRIES:
-                        logger.warning("Chapter call failed, retrying for JSON (%s/%s)", json_try + 1, JSON_RETRIES)
-                        continue
-                    raise
-                data = _parse_diglot_json(out)
-                if data:
-                    return data
-                if json_try < JSON_RETRIES:
-                    logger.warning("Invalid JSON, retrying (%s/%s)", json_try + 1, JSON_RETRIES)
-            return None
-
-        def _check_and_assemble(
-            main_text: str, glossary: List[str], target_pct: float
-        ) -> Optional[str]:
-            """Validate length and (optionally) %; return assembled chapter or None."""
-            if not _output_length_ok(html, main_text):
+        def _valid_out(out: Optional[str]) -> bool:
+            if not out:
+                return False
+            if not _output_length_ok(html, out):
                 logger.warning(
-                    "Chapter main_text too short (<%s%% of original), retrying or using fallback",
+                    "Chapter output too short (<%s%% of original length), retrying or using fallback",
                     int(MIN_OUTPUT_LENGTH_RATIO * 100),
                 )
-                return None
-            actual_pct = _count_english_percent(main_text, use_uppercase)
-            if actual_pct is not None and abs(actual_pct - target_pct) > 10:
-                return None  # caller will retry with % addendum
-            return _assemble_chapter_from_json(main_text, glossary, use_uppercase)
-
-        target_pct = float(target_percent)
+                return False
+            return True
 
         # Tier 1: selected model, 3 attempts, 5s delay
         for attempt in range(TIER1_ATTEMPTS):
             try:
-                current_user = user
-                data = await _try_one(self.model, system, current_user)
-                if not data:
-                    continue
-                main_text, glossary = data
-                assembled = _check_and_assemble(main_text, glossary, target_pct)
-                if assembled:
-                    return assembled
-                for pct_try in range(PCT_RETRIES):
-                    current_user = (
-                        user
-                        + "\n\n[CRITICAL] Last response had "
-                        + str(round(_count_english_percent(main_text, use_uppercase) or 0))
-                        + "% English in main_text. You MUST achieve exactly "
-                        + str(int(round(target_pct)))
-                        + "% in main_text."
-                    )
-                    data = await _try_one(self.model, system, current_user)
-                    if not data:
-                        break
-                    main_text, glossary = data
-                    assembled = _check_and_assemble(main_text, glossary, target_pct)
-                    if assembled:
-                        return assembled
-                if assembled is None and main_text:
-                    logger.warning(
-                        "English %% in main_text off by >10%% after retries (target %s%%)",
-                        int(round(target_pct)),
-                    )
+                out = await self._call_chapter_once(self.model, system, user)
+                if _valid_out(out):
+                    return out
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
@@ -540,30 +382,9 @@ class OpenRouterTranslator:
         # Tier 2: gpt-4o-mini (first fallback), 2 attempts
         for attempt in range(TIER2_ATTEMPTS):
             try:
-                current_user = user
-                data = await _try_one(TIER2_MODEL, system, current_user)
-                if not data:
-                    continue
-                main_text, glossary = data
-                assembled = _check_and_assemble(main_text, glossary, target_pct)
-                if assembled:
-                    return assembled
-                for pct_try in range(PCT_RETRIES):
-                    current_user = (
-                        user
-                        + "\n\n[CRITICAL] Last response had "
-                        + str(round(_count_english_percent(main_text, use_uppercase) or 0))
-                        + "% English in main_text. You MUST achieve exactly "
-                        + str(int(round(target_pct)))
-                        + "% in main_text."
-                    )
-                    data = await _try_one(TIER2_MODEL, system, current_user)
-                    if not data:
-                        break
-                    main_text, glossary = data
-                    assembled = _check_and_assemble(main_text, glossary, target_pct)
-                    if assembled:
-                        return assembled
+                out = await self._call_chapter_once(TIER2_MODEL, system, user)
+                if _valid_out(out):
+                    return out
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
@@ -572,30 +393,9 @@ class OpenRouterTranslator:
         # Tier 3: gemini-2.0-flash (second fallback), 2 attempts
         for attempt in range(TIER3_ATTEMPTS):
             try:
-                current_user = user
-                data = await _try_one(TIER3_MODEL, system, current_user)
-                if not data:
-                    continue
-                main_text, glossary = data
-                assembled = _check_and_assemble(main_text, glossary, target_pct)
-                if assembled:
-                    return assembled
-                for pct_try in range(PCT_RETRIES):
-                    current_user = (
-                        user
-                        + "\n\n[CRITICAL] Last response had "
-                        + str(round(_count_english_percent(main_text, use_uppercase) or 0))
-                        + "% English in main_text. You MUST achieve exactly "
-                        + str(int(round(target_pct)))
-                        + "% in main_text."
-                    )
-                    data = await _try_one(TIER3_MODEL, system, current_user)
-                    if not data:
-                        break
-                    main_text, glossary = data
-                    assembled = _check_and_assemble(main_text, glossary, target_pct)
-                    if assembled:
-                        return assembled
+                out = await self._call_chapter_once(TIER3_MODEL, system, user)
+                if _valid_out(out):
+                    return out
             except Exception as e:
                 if not _is_retryable_error(e):
                     raise
