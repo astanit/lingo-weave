@@ -82,12 +82,8 @@ def calculate_price(word_count: int, model_tier: str) -> int:
 
 # Pending model choice: choice_id -> { "file_id", "chat_id", "user_id", "file_name", "is_admin", "word_count" }
 _pending_choice: Dict[str, Dict[str, Any]] = {}
-# Pending level choice (after model selected): level_choice_id -> { same + "model_id", "tier", "amount" }
-_pending_level: Dict[str, Dict[str, Any]] = {}
-# Pending payments: payload_id -> { "file_id", "chat_id", "user_id", "file_name", "model_id", "target_level" }
+# Pending payments: payload_id -> { "file_id", "chat_id", "user_id", "file_name", "model_id" }
 _pending: Dict[str, Dict[str, Any]] = {}
-
-ENGLISH_LEVELS = ("A1", "A2", "B1", "B2", "C1")
 
 # Admin: chat_id set when admin first interacts (for error notifications)
 _admin_chat_id: Optional[int] = None
@@ -359,7 +355,6 @@ async def _run_with_semaphore(
     ext: str,
     result_filename: str,
     model_id: Optional[str] = None,
-    target_level: Optional[str] = None,
     *,
     paid: bool = False,
     user_username: Optional[str] = None,
@@ -383,7 +378,7 @@ async def _run_with_semaphore(
         _queue_waiting -= 1
         _running_books += 1
         await _do_translation_flow(
-            bot, chat_id, input_path, ext, result_filename, model_id=model_id, target_level=target_level,
+            bot, chat_id, input_path, ext, result_filename, model_id=model_id,
             paid=paid, user_username=user_username, user_id=user_id, file_name=file_name,
         )
     finally:
@@ -398,9 +393,8 @@ async def _run_translation(
     chat_id: int,
     bot: Bot,
     model_id: Optional[str] = None,
-    target_level: Optional[str] = None,
 ) -> Optional[tuple]:
-    """Run the appropriate weaver. Returns (output_path, failed_count, total_chapters) or None. target_level: A1–C1."""
+    """Run the appropriate weaver. Returns (output_path, failed_count, total_chapters) or None."""
     from app.services.epub_weave import WeaveOptions, run_weave_epub_async
     from app.services.txt_weave import run_weave_txt_async
     from app.services.fb2_weave import run_weave_fb2_async
@@ -415,17 +409,17 @@ async def _run_translation(
     try:
         if ext == ".epub":
             _, output_path, failed_count, total = await run_weave_epub_async(
-                input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id, target_level=target_level
+                input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id
             )
             return (output_path, failed_count, total)
         elif ext == ".txt":
             _, output_path = await run_weave_txt_async(
-                input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id, target_level=target_level
+                input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id
             )
             return (output_path, 0, 0)
         elif ext == ".fb2":
             _, output_path = await run_weave_fb2_async(
-                input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id, target_level=target_level
+                input_path, outputs_dir, options=opts, progress_callback=_progress, model_id=model_id
             )
             return (output_path, 0, 0)
         else:
@@ -459,7 +453,6 @@ async def _do_translation_flow(
     ext: str,
     result_filename: str,
     model_id: Optional[str] = None,
-    target_level: Optional[str] = None,
     *,
     paid: bool = False,
     user_username: Optional[str] = None,
@@ -505,7 +498,7 @@ async def _do_translation_flow(
                     logger.debug("Progress edit failed: %s", e)
 
         result = await _run_translation(
-            input_path, ext, progress_callback, chat_id, bot, model_id=model_id, target_level=target_level
+            input_path, ext, progress_callback, chat_id, bot, model_id=model_id
         )
         if not result:
             raise RuntimeError("Translation produced no output")
@@ -589,21 +582,6 @@ async def _do_translation_flow(
         _active_translations = max(0, _active_translations - 1)
 
 
-def _level_choice_keyboard(level_choice_id: str) -> InlineKeyboardMarkup:
-    """Inline buttons for English level (A1–C1)."""
-    labels = [
-        ("👶 A1 - Beginner (Базовые слова)", "A1"),
-        ("🧒 A2 - Elementary (Простые понятия)", "A2"),
-        ("👱 B1 - Intermediate (Средний уровень)", "B1"),
-        ("🎓 B2 - Upper-Intermediate (Продвинутый)", "B2"),
-        ("🏛️ C1 - Advanced (Сложная лексика)", "C1"),
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=text, callback_data=f"level:{level_choice_id}:{lev}")]
-        for text, lev in labels
-    ])
-
-
 def _model_choice_keyboard(choice_id: str, word_count: Optional[int] = None) -> InlineKeyboardMarkup:
     """word_count=None for admin (0 звёзд); else show dynamic prices per 1k words."""
     if word_count is None:
@@ -685,7 +663,7 @@ async def on_document(message: Message, bot: Bot):
 
 @router.callback_query(F.data.startswith("tier:"))
 async def on_model_choice(callback: CallbackQuery, bot: Bot):
-    """User chose a model: store selection and ask for English level (do not send invoice yet)."""
+    """User chose a model: send invoice (or start translation for admin) immediately."""
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
         await callback.answer("Ошибка. Отправьте файл заново.", show_alert=True)
@@ -701,52 +679,6 @@ async def on_model_choice(callback: CallbackQuery, bot: Bot):
 
     model_id = TIERS[tier][0]
     amount = 0 if data["is_admin"] else calculate_price(data.get("word_count") or 0, tier)
-    chat_id = data["chat_id"]
-    file_id = data["file_id"]
-    file_name = data["file_name"]
-    ext = _get_extension(file_name)
-    if not ext:
-        await callback.answer("Неверный формат файла.", show_alert=True)
-        return
-
-    await callback.answer()
-    level_choice_id = uuid.uuid4().hex
-    _pending_level[level_choice_id] = {
-        "file_id": file_id,
-        "chat_id": chat_id,
-        "user_id": data["user_id"],
-        "file_name": file_name,
-        "is_admin": data["is_admin"],
-        "word_count": data.get("word_count"),
-        "model_id": model_id,
-        "tier": tier,
-        "amount": amount,
-    }
-    await bot.send_message(
-        chat_id,
-        "Выберите ваш уровень владения английским. Это определит, какие слова я буду переводить:",
-        reply_markup=_level_choice_keyboard(level_choice_id),
-    )
-
-
-@router.callback_query(F.data.startswith("level:"))
-async def on_level_choice(callback: CallbackQuery, bot: Bot):
-    """User chose English level: send invoice (or start translation for admin)."""
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Ошибка. Отправьте файл заново.", show_alert=True)
-        return
-    _, level_choice_id, level = parts
-    if level not in ENGLISH_LEVELS:
-        await callback.answer("Неизвестный уровень.", show_alert=True)
-        return
-    data = _pending_level.pop(level_choice_id, None)
-    if not data:
-        await callback.answer("Сессия истекла. Отправьте файл заново.", show_alert=True)
-        return
-
-    model_id = data["model_id"]
-    amount = data["amount"]
     chat_id = data["chat_id"]
     file_id = data["file_id"]
     file_name = data["file_name"]
@@ -770,7 +702,7 @@ async def on_level_choice(callback: CallbackQuery, bot: Bot):
         result_name = "lingoweave" + ext
         asyncio.create_task(
             _run_with_semaphore(
-                bot, chat_id, str(dest), ext, result_name, model_id=model_id, target_level=level,
+                bot, chat_id, str(dest), ext, result_name, model_id=model_id,
                 paid=False, user_username=callback.from_user.username, user_id=callback.from_user.id, file_name=file_name,
             )
         )
@@ -783,7 +715,6 @@ async def on_level_choice(callback: CallbackQuery, bot: Bot):
         "user_id": data["user_id"],
         "file_name": file_name,
         "model_id": model_id,
-        "target_level": level,
     }
     await bot.send_invoice(
         chat_id=chat_id,
@@ -842,11 +773,10 @@ async def on_successful_payment(message: Message, bot: Bot):
         return
 
     model_id = data.get("model_id")
-    target_level = data.get("target_level")
     result_name = "lingoweave" + ext
     asyncio.create_task(
         _run_with_semaphore(
-            bot, chat_id, str(dest), ext, result_name, model_id=model_id, target_level=target_level,
+            bot, chat_id, str(dest), ext, result_name, model_id=model_id,
             paid=True, user_username=message.from_user.username, user_id=message.from_user.id, file_name=file_name,
         )
     )

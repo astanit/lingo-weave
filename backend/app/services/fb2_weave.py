@@ -152,7 +152,6 @@ async def run_weave_fb2_async(
     options: Optional[WeaveOptions] = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
-    target_level: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Async entry point for FB2 weave with optional progress (e.g. for Telegram bot)."""
     options = options or WeaveOptions()
@@ -183,7 +182,6 @@ async def run_weave_fb2_async(
         seg_html = _wrap_segment_html(seg)
         weaved = await process_one_segment_async(
             seg_html, idx, total, translator, options, global_vocab, already_glossaried,
-            target_level=target_level,
         )
         weaved_list.append(weaved)
         if progress_callback:

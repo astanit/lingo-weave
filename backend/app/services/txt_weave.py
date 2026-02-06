@@ -104,7 +104,6 @@ async def run_weave_txt_async(
     options: Optional[WeaveOptions] = None,
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
-    target_level: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Async entry point for TXT weave with optional progress (e.g. for Telegram bot)."""
     options = options or WeaveOptions()
@@ -135,7 +134,6 @@ async def run_weave_txt_async(
         weaved = await process_one_segment_async(
             seg_html, idx, total, translator, options, global_vocab, already_glossaried,
             use_uppercase=True,
-            target_level=target_level,
         )
         results_plain.append(weaved)  # TXT: already plain text
         if progress_callback:
