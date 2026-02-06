@@ -14,8 +14,18 @@ PROGRESS_EDIT_THROTTLE_SECONDS = 4
 
 # Global queue: only 2 books processed at a time
 GLOBAL_BOOK_SEMAPHORE = asyncio.Semaphore(2)
+# Parallel processing within a book (e.g. chapters)
+CHAPTER_SEMAPHORE = asyncio.Semaphore(15)
 _running_books = 0
 _queue_waiting = 0
+
+# Trial: first 2000 chars or first chapter, translated with Gemini
+TRIAL_MODEL = "google/gemini-2.0-flash-001"
+SAMPLE_CHAR_LIMIT = 2000
+
+import ebooklib
+from ebooklib import epub
+from lxml import etree
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
@@ -87,6 +97,129 @@ def _get_extension(filename: Optional[str]) -> str:
         if lower.endswith(ext):
             return ext
     return ""
+
+
+def _create_sample_file(input_path: str, ext: str) -> Optional[Path]:
+    """Create a sample file: first 2000 chars (TXT/FB2) or first chapter (EPUB). Returns path or None."""
+    try:
+        sample_id = uuid.uuid4().hex
+        if ext == ".txt":
+            with open(input_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(SAMPLE_CHAR_LIMIT + 500)
+            if not text.strip():
+                return None
+            sample_path = UPLOADS_DIR / f"sample_{sample_id}.txt"
+            sample_path.write_text(text[:SAMPLE_CHAR_LIMIT], encoding="utf-8")
+            return sample_path
+        if ext == ".epub":
+            book = epub.read_epub(input_path)
+            items = [
+                i for i in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)
+                if getattr(i, "get_type", lambda: ebooklib.ITEM_DOCUMENT)() == ebooklib.ITEM_DOCUMENT
+                and isinstance(i, epub.EpubHtml)
+            ]
+            if not items:
+                return None
+            first = items[0]
+            content = first.get_content()
+            if not content:
+                return None
+            new_book = epub.EpubBook()
+            ch = epub.EpubHtml(
+                title="Sample",
+                file_name="sample.xhtml",
+                content=content,
+            )
+            new_book.add_item(ch)
+            new_book.spine = ["nav", ch]
+            sample_path = UPLOADS_DIR / f"sample_{sample_id}.epub"
+            epub.write_epub(str(sample_path), new_book)
+            return sample_path
+        if ext == ".fb2":
+            parser = etree.XMLParser(recover=True)
+            tree = etree.parse(input_path, parser)
+            root = tree.getroot()
+            ns = "http://www.gribuser.ru/xml/fictionbook/2.0"
+            parts = []
+            n = 0
+            for p in root.iter(f"{{{ns}}}p"):
+                text = (p.text or "") + "".join((e.text or "") + (e.tail or "") for e in p)
+                parts.append(text)
+                n += len(text)
+                if n >= SAMPLE_CHAR_LIMIT:
+                    break
+            if not parts:
+                return None
+            sample_path = UPLOADS_DIR / f"sample_{sample_id}.txt"
+            sample_path.write_text("\n\n".join(parts)[:SAMPLE_CHAR_LIMIT], encoding="utf-8")
+            return sample_path
+    except Exception as e:
+        logger.exception("Create sample failed: %s", e)
+    return None
+
+
+async def _run_trial_then_upsell(
+    bot: Bot,
+    chat_id: int,
+    full_path: Path,
+    ext: str,
+    file_id: str,
+    file_name: str,
+    user_id: int,
+):
+    """Create sample, translate with Gemini, send snippet, then show 4-model upsell."""
+    sample_path = _create_sample_file(str(full_path), ext)
+    if not sample_path or not sample_path.exists():
+        await bot.send_message(chat_id, "Не удалось подготовить пробный фрагмент. Отправьте файл ещё раз или выберите модель ниже.")
+        choice_id = uuid.uuid4().hex
+        _pending_choice[choice_id] = {
+            "file_id": file_id,
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "file_name": file_name,
+            "is_admin": False,
+        }
+        await bot.send_message(
+            chat_id,
+            "Чтобы перевести всю книгу целиком, выберите качество:",
+            reply_markup=_model_choice_keyboard(choice_id),
+        )
+        return
+    sample_ext = sample_path.suffix.lower()
+    if sample_ext not in ALLOWED_EXTENSIONS:
+        sample_ext = ".txt"
+    result = await _run_translation(
+        str(sample_path), sample_ext, None, chat_id, bot, model_id=TRIAL_MODEL
+    )
+    try:
+        os.remove(sample_path)
+    except OSError:
+        pass
+    choice_id = uuid.uuid4().hex
+    if not result:
+        await bot.send_message(chat_id, "Пробный фрагмент не удалось перевести. Выберите модель для полной книги:")
+    else:
+        output_path, _, _ = result
+        if output_path and os.path.exists(output_path):
+            result_filename = "SAMPLE_LingoWeave" + (".txt" if sample_ext == ".txt" else ext)
+            doc = FSInputFile(output_path, filename=result_filename)
+            await bot.send_document(chat_id, doc)
+    await bot.send_message(
+        chat_id,
+        "👆 Это пример перевода вашей книги. Чтобы перевести всю книгу целиком, выберите качество:" if result else "Чтобы перевести всю книгу целиком, выберите качество:",
+        reply_markup=_model_choice_keyboard(choice_id),
+    )
+    _pending_choice[choice_id] = {
+        "file_id": file_id,
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "file_name": file_name,
+        "is_admin": False,
+    }
+    try:
+        os.remove(full_path)
+    except OSError:
+        pass
 
 
 def _progress_bar(percent: int, length: int = 10) -> str:
@@ -388,20 +521,34 @@ async def on_document(message: Message, bot: Bot):
         global _admin_chat_id
         _admin_chat_id = chat_id
 
-    choice_id = uuid.uuid4().hex
-    _pending_choice[choice_id] = {
-        "file_id": file_id,
-        "chat_id": chat_id,
-        "user_id": message.from_user.id,
-        "file_name": filename or ("file" + ext),
-        "is_admin": is_admin,
-    }
-
     if is_admin:
+        choice_id = uuid.uuid4().hex
+        _pending_choice[choice_id] = {
+            "file_id": file_id,
+            "chat_id": chat_id,
+            "user_id": message.from_user.id,
+            "file_name": filename or ("file" + ext),
+            "is_admin": True,
+        }
         await message.answer("Привет, админ! Выбери модель — оплата не требуется.")
-    await message.answer(
-        "Выберите качество перевода:",
-        reply_markup=_model_choice_keyboard(choice_id),
+        await message.answer(
+            "Выберите качество перевода:",
+            reply_markup=_model_choice_keyboard(choice_id),
+        )
+        return
+
+    await message.answer("Книга получена! Готовлю бесплатный пробный фрагмент... ⏳")
+    upload_id = uuid.uuid4().hex
+    dest = UPLOADS_DIR / f"{upload_id}{ext}"
+    ok = await _download_document(bot, file_id, dest)
+    if not ok:
+        await message.answer("Не удалось скачать файл. Отправьте его снова.")
+        return
+    asyncio.create_task(
+        _run_trial_then_upsell(
+            bot, chat_id, dest, ext, file_id,
+            filename or ("file" + ext), message.from_user.id,
+        )
     )
 
 
