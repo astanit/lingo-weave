@@ -1,13 +1,19 @@
 """
-Anki/Quizlet CSV export: collect glossary words from weaved chapters, deduplicate, add first occurrence sentence.
-Format: Front,Back,Example (word, перевод, "Context sentence with word")
+Anki/Quizlet CSV export: glossary words, deduplicate, first occurrence sentence.
+Format: semicolon-delimited, Anki headers, Example with <b>WORD</b> for target word.
 """
-import csv
 import re
 from pathlib import Path
 from typing import List, Tuple
 
 from bs4 import BeautifulSoup
+
+# Anki import directives (must be at top of file)
+ANKI_HEADER_LINES = [
+    "#separator:Semicolon",
+    "#html:true",
+    "#columns:Front;Back;Example",
+]
 
 
 def _first_sentence_containing(text: str, word: str) -> str:
@@ -90,14 +96,46 @@ def get_glossary_entries_with_examples(weaved_html: str) -> List[Tuple[str, str,
     return entries
 
 
+def _example_with_bold_uppercase(example: str, word: str) -> str:
+    """
+    Put the target word in the example as <b>WORD</b> (uppercase).
+    Normalize: no newlines (replace with space), collapse spaces.
+    """
+    if not example or not word or not word.strip():
+        return (example or "").strip()
+    word_clean = word.strip()
+    # Single line, no stray newlines
+    normalized = re.sub(r"\s+", " ", (example or "").replace("\n", " ").replace("\r", " ")).strip()
+    # Replace first occurrence of word (case-insensitive) with <b>WORD</b>
+    pattern = re.compile(re.escape(word_clean), re.IGNORECASE)
+    match = pattern.search(normalized)
+    if match:
+        normalized = (
+            normalized[: match.start()]
+            + f"<b>{word_clean.upper()}</b>"
+            + normalized[match.end() :]
+        )
+    return normalized
+
+
+def _csv_escape(field: str) -> str:
+    """Escape field for semicolon-delimited CSV: quote if contains ; or \" or newline."""
+    if not field:
+        return ""
+    if ";" in field or '"' in field or "\n" in field or "\r" in field:
+        return '"' + field.replace('"', '""') + '"'
+    return field
+
+
 def build_anki_csv(
     entries: List[Tuple[str, str, str]],
     output_dir: str,
     book_title: str,
 ) -> str:
     """
-    Deduplicate by Front (first occurrence wins), write CSV.
-    Format: Front,Back,Example
+    Deduplicate by Front (first occurrence wins), write Anki-compatible CSV.
+    Delimiter: semicolon. Headers: #separator:Semicolon, #html:true, #columns:Front;Back;Example.
+    Example field: target word wrapped in <b> and UPPERCASE. UTF-8 with BOM.
     Filename: [BOOK_TITLE]_LingoWeave_Flashcards.csv
     Returns path to written file.
     """
@@ -112,18 +150,22 @@ def build_anki_csv(
         if key in seen:
             continue
         seen.add(key)
-        unique.append((front.strip(), back.strip(), (example or "").strip()))
+        front_s = front.strip()
+        back_s = back.strip()
+        example_s = _example_with_bold_uppercase((example or "").strip(), front_s)
+        unique.append((front_s, back_s, example_s))
 
-    safe_title = re.sub(r'[^\w\s-]', '', book_title).strip() or "Book"
-    safe_title = re.sub(r'[-\s]+', '_', safe_title)[:80]
+    safe_title = re.sub(r"[^\w\s-]", "", book_title).strip() or "Book"
+    safe_title = re.sub(r"[-\s]+", "_", safe_title)[:80]
     filename = f"{safe_title}_LingoWeave_Flashcards.csv"
     path = Path(output_dir) / filename
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Front", "Back", "Example"])
+        for line in ANKI_HEADER_LINES:
+            f.write(line + "\n")
         for front, back, example in unique:
-            writer.writerow([front, back, example])
+            row = _csv_escape(front) + ";" + _csv_escape(back) + ";" + _csv_escape(example)
+            f.write(row + "\n")
 
     return str(path)

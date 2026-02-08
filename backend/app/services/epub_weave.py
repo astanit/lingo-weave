@@ -47,12 +47,37 @@ class WeaveOptions:
     bold_translations: bool = True
 
 
-def chapter_target_ratio(chapter_index: int, total_chapters: int) -> float:
-    """Target English percentage: Ch1 20%, linear to last 100%. Formula: 20 + (index/(n-1))*80."""
+# Immersion mode -> (min_percent, max_percent) for density progression
+IMMERSION_RANGES = {
+    "Light": (10, 60),
+    "Standard": (20, 100),
+    "Hardcore": (40, 100),
+}
+DEFAULT_IMMERSION = "Standard"
+
+
+def chapter_target_ratio(
+    chapter_index: int,
+    total_chapters: int,
+    immersion_mode: Optional[str] = None,
+) -> float:
+    """
+    Target English ratio (0.0–1.0) for this chapter. Linear progression from min to max.
+    Light: 10%→60%; Standard: 20%→100%; Hardcore: 40%→100%.
+    """
     if total_chapters <= 1:
-        return 1.0
-    target_percent = 20 + (chapter_index / (total_chapters - 1)) * 80
-    return max(0.20, min(1.0, target_percent / 100.0))
+        min_pct, max_pct = IMMERSION_RANGES.get(
+            (immersion_mode or DEFAULT_IMMERSION).strip(),
+            IMMERSION_RANGES[DEFAULT_IMMERSION],
+        )
+        return max_pct / 100.0
+    ratio_01 = chapter_index / (total_chapters - 1)
+    min_pct, max_pct = IMMERSION_RANGES.get(
+        (immersion_mode or DEFAULT_IMMERSION).strip(),
+        IMMERSION_RANGES[DEFAULT_IMMERSION],
+    )
+    target_percent = min_pct + ratio_01 * (max_pct - min_pct)
+    return max(0.0, min(1.0, target_percent / 100.0))
 
 
 def count_chapter_words(html: str) -> int:
@@ -135,12 +160,13 @@ async def process_one_segment_async(
     already_glossaried: Set[str],
     use_uppercase: bool = False,
     target_level: Optional[str] = None,
+    immersion_mode: Optional[str] = None,
 ) -> str:
     """
     Process one segment (virtual chapter) with Diglot Weave. Updates global_vocab and already_glossaried from glossary.
     use_uppercase=True for .txt: glossary at top + plain story.
     """
-    ratio = chapter_target_ratio(segment_index, total_segments)
+    ratio = chapter_target_ratio(segment_index, total_segments, immersion_mode=immersion_mode)
     target_percent = round(ratio * 100)
     logger.info("Segment %s/%s: target %s%%", segment_index + 1, total_segments, target_percent)
     weaved = await _weave_chapter_async(
@@ -200,6 +226,7 @@ async def _process_single_chapter_async(
     previous_vocab: Optional[Dict[str, str]] = None,
     already_glossaried: Optional[Set[str]] = None,
     target_level: Optional[str] = None,
+    immersion_mode: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Process one chapter (non-blocking). Returns (item_id, html). Uses previous_vocab for consistency.
@@ -213,7 +240,7 @@ async def _process_single_chapter_async(
     original = str(original)
 
     try:
-        ratio = chapter_target_ratio(idx, total)
+        ratio = chapter_target_ratio(idx, total, immersion_mode=immersion_mode)
         target_percent = round(ratio * 100)
         print(f"Chapter {chapter_num}: Target percent set to {target_percent}%", flush=True)
         weaved = await _weave_chapter_async(
@@ -221,7 +248,7 @@ async def _process_single_chapter_async(
             ratio,
             translator,
             options,
-            target_percent=target_percent,
+            target_percent=float(target_percent),
             previous_vocab=previous_vocab,
             already_glossaried=already_glossaried,
             target_level=target_level,
@@ -246,6 +273,7 @@ async def _weave_epub_async(
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
     target_level: Optional[str] = None,
+    immersion_mode: Optional[str] = None,
 ) -> Tuple[str, str, int, int, List[Tuple[str, str, str]]]:
     options = options or WeaveOptions()
     out_root = Path(outputs_dir)
@@ -284,6 +312,7 @@ async def _weave_epub_async(
                 previous_vocab=global_vocab,
                 already_glossaried=already_glossaried,
                 target_level=target_level,
+                immersion_mode=immersion_mode,
             )
             if html is not None and isinstance(html, str):
                 translated_items[rid] = html
@@ -376,6 +405,7 @@ async def run_weave_epub_async(
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
     target_level: Optional[str] = None,
+    immersion_mode: Optional[str] = None,
 ) -> Tuple[str, str, int, int, List[Tuple[str, str, str]]]:
     """Async entry point for EPUB weave. Returns (job_id, output_path, failed_count, total_chapters, anki_entries)."""
     options = options or WeaveOptions()
@@ -386,4 +416,5 @@ async def run_weave_epub_async(
         progress_callback=progress_callback,
         model_id=model_id,
         target_level=target_level,
+        immersion_mode=immersion_mode,
     )

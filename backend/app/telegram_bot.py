@@ -84,10 +84,13 @@ def calculate_price(word_count: int, model_tier: str) -> int:
 _pending_choice: Dict[str, Dict[str, Any]] = {}
 # Pending level choice (after model): level_choice_id -> { same + "model_id", "tier", "amount" }
 _pending_level: Dict[str, Dict[str, Any]] = {}
-# Pending payments: payload_id -> { "file_id", "chat_id", "user_id", "file_name", "model_id", "target_level" }
+# Pending immersion choice (after level): immersion_choice_id -> { same + "target_level" }
+_pending_immersion: Dict[str, Dict[str, Any]] = {}
+# Pending payments: payload_id -> { "file_id", "chat_id", "user_id", "file_name", "model_id", "target_level", "immersion_mode" }
 _pending: Dict[str, Dict[str, Any]] = {}
 
 ENGLISH_LEVELS = ("A1", "A2", "B1", "B2", "C1")
+IMMERSION_MODES = ("Light", "Standard", "Hardcore")
 
 # Admin: chat_id set when admin first interacts (for error notifications)
 _admin_chat_id: Optional[int] = None
@@ -360,6 +363,7 @@ async def _run_with_semaphore(
     result_filename: str,
     model_id: Optional[str] = None,
     target_level: Optional[str] = None,
+    immersion_mode: Optional[str] = None,
     *,
     paid: bool = False,
     user_username: Optional[str] = None,
@@ -383,7 +387,7 @@ async def _run_with_semaphore(
         _queue_waiting -= 1
         _running_books += 1
         await _do_translation_flow(
-            bot, chat_id, input_path, ext, result_filename, model_id=model_id, target_level=target_level,
+            bot, chat_id, input_path, ext, result_filename, model_id=model_id, target_level=target_level, immersion_mode=immersion_mode,
             paid=paid, user_username=user_username, user_id=user_id, file_name=file_name,
         )
     finally:
@@ -399,6 +403,7 @@ async def _run_translation(
     bot: Bot,
     model_id: Optional[str] = None,
     target_level: Optional[str] = None,
+    immersion_mode: Optional[str] = None,
 ) -> Optional[tuple]:
     """Run the appropriate weaver. Returns (output_path, failed_count, total_chapters, anki_entries) or None."""
     from app.services.epub_weave import WeaveOptions, run_weave_epub_async
@@ -416,19 +421,19 @@ async def _run_translation(
         if ext == ".epub":
             _, output_path, failed_count, total, anki_entries = await run_weave_epub_async(
                 input_path, outputs_dir, options=opts, progress_callback=_progress,
-                model_id=model_id, target_level=target_level,
+                model_id=model_id, target_level=target_level, immersion_mode=immersion_mode,
             )
             return (output_path, failed_count, total, anki_entries)
         elif ext == ".txt":
             _, output_path, anki_entries = await run_weave_txt_async(
                 input_path, outputs_dir, options=opts, progress_callback=_progress,
-                model_id=model_id, target_level=target_level,
+                model_id=model_id, target_level=target_level, immersion_mode=immersion_mode,
             )
             return (output_path, 0, 0, anki_entries)
         elif ext == ".fb2":
             _, output_path, anki_entries = await run_weave_fb2_async(
                 input_path, outputs_dir, options=opts, progress_callback=_progress,
-                model_id=model_id, target_level=target_level,
+                model_id=model_id, target_level=target_level, immersion_mode=immersion_mode,
             )
             return (output_path, 0, 0, anki_entries)
         else:
@@ -463,6 +468,7 @@ async def _do_translation_flow(
     result_filename: str,
     model_id: Optional[str] = None,
     target_level: Optional[str] = None,
+    immersion_mode: Optional[str] = None,
     *,
     paid: bool = False,
     user_username: Optional[str] = None,
@@ -508,7 +514,7 @@ async def _do_translation_flow(
                     logger.debug("Progress edit failed: %s", e)
 
         result = await _run_translation(
-            input_path, ext, progress_callback, chat_id, bot, model_id=model_id, target_level=target_level
+            input_path, ext, progress_callback, chat_id, bot, model_id=model_id, target_level=target_level, immersion_mode=immersion_mode
         )
         if not result:
             raise RuntimeError("Translation produced no output")
@@ -628,6 +634,19 @@ def _level_choice_keyboard(level_choice_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=text, callback_data=f"level:{level_choice_id}:{lev}")]
         for text, lev in labels
+    ])
+
+
+def _immersion_choice_keyboard(immersion_choice_id: str) -> InlineKeyboardMarkup:
+    """Inline buttons for immersion mode (Light / Standard / Hardcore)."""
+    labels = [
+        ("🌱 Light (10%→60%)", "Light"),
+        ("📖 Standard (20%→100%)", "Standard"),
+        ("🔥 Hardcore (40%→100%)", "Hardcore"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=text, callback_data=f"immersion:{immersion_choice_id}:{mode}")]
+        for text, mode in labels
     ])
 
 
@@ -758,7 +777,7 @@ async def on_model_choice(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("level:"))
 async def on_level_choice(callback: CallbackQuery, bot: Bot):
-    """User chose level: send invoice (or start translation for admin) with target_level."""
+    """User chose level: ask for immersion mode (Light / Standard / Hardcore)."""
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
         await callback.answer("Ошибка. Отправьте файл заново.", show_alert=True)
@@ -772,12 +791,47 @@ async def on_level_choice(callback: CallbackQuery, bot: Bot):
         await callback.answer("Сессия истекла. Отправьте файл заново.", show_alert=True)
         return
 
+    ext = _get_extension(data["file_name"])
+    if not ext:
+        await callback.answer("Неверный формат файла.", show_alert=True)
+        return
+
+    await callback.answer()
+    immersion_choice_id = uuid.uuid4().hex
+    _pending_immersion[immersion_choice_id] = {
+        **data,
+        "target_level": level,
+    }
+    await bot.send_message(
+        callback.message.chat.id if callback.message else data["chat_id"],
+        "Выберите режим погружения. От него зависит, сколько слов в главах будет переведено на английский:",
+        reply_markup=_immersion_choice_keyboard(immersion_choice_id),
+    )
+
+
+@router.callback_query(F.data.startswith("immersion:"))
+async def on_immersion_choice(callback: CallbackQuery, bot: Bot):
+    """User chose immersion: send invoice (or start translation for admin) with target_level + immersion_mode."""
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Ошибка. Отправьте файл заново.", show_alert=True)
+        return
+    _, immersion_choice_id, mode = parts
+    if mode not in IMMERSION_MODES:
+        await callback.answer("Неизвестный режим.", show_alert=True)
+        return
+    data = _pending_immersion.pop(immersion_choice_id, None)
+    if not data:
+        await callback.answer("Сессия истекла. Отправьте файл заново.", show_alert=True)
+        return
+
     model_id = data["model_id"]
     amount = data["amount"]
     chat_id = data["chat_id"]
     file_id = data["file_id"]
     file_name = data["file_name"]
     is_admin = data["is_admin"]
+    level = data.get("target_level", "B1")
     ext = _get_extension(file_name)
     if not ext:
         await callback.answer("Неверный формат файла.", show_alert=True)
@@ -797,7 +851,7 @@ async def on_level_choice(callback: CallbackQuery, bot: Bot):
         result_name = "lingoweave" + ext
         asyncio.create_task(
             _run_with_semaphore(
-                bot, chat_id, str(dest), ext, result_name, model_id=model_id, target_level=level,
+                bot, chat_id, str(dest), ext, result_name, model_id=model_id, target_level=level, immersion_mode=mode,
                 paid=False, user_username=callback.from_user.username, user_id=callback.from_user.id, file_name=file_name,
             )
         )
@@ -811,6 +865,7 @@ async def on_level_choice(callback: CallbackQuery, bot: Bot):
         "file_name": file_name,
         "model_id": model_id,
         "target_level": level,
+        "immersion_mode": mode,
     }
     await bot.send_invoice(
         chat_id=chat_id,
@@ -870,10 +925,11 @@ async def on_successful_payment(message: Message, bot: Bot):
 
     model_id = data.get("model_id")
     target_level = data.get("target_level")
+    immersion_mode = data.get("immersion_mode")
     result_name = "lingoweave" + ext
     asyncio.create_task(
         _run_with_semaphore(
-            bot, chat_id, str(dest), ext, result_name, model_id=model_id, target_level=target_level,
+            bot, chat_id, str(dest), ext, result_name, model_id=model_id, target_level=target_level, immersion_mode=immersion_mode,
             paid=True, user_username=message.from_user.username, user_id=message.from_user.id, file_name=file_name,
         )
     )

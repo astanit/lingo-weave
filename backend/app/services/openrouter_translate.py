@@ -71,14 +71,20 @@ LEVEL_INSTRUCTIONS = {
     "C1": "Ignore common words. Only use rare, literary, academic vocabulary. Example: endeavor, profound, unconscious.",
 }
 
-# Simple diglot weave: direct text output (weave + glossary in one string). No JSON.
-DIGLOT_SYSTEM_PROMPT = """You are a Diglot Weave teacher. Rewrite the text replacing exactly {target_percent}% of words with English. Wrap every English word in <b>tags</b> (e.g. <b>word</b>). Preserve all HTML (e.g. <p>, <div>, <br>). Keep names and places in original Russian Cyrillic. At the end add: Glossary: word — перевод (one per line, 10-15 words). Return the full text + glossary in one response. No JSON, no code blocks.
+# Diglot Weave: Level + Density + Formatting (The Brain).
+DIGLOT_SYSTEM_PROMPT = """You are a Diglot Weave expert.
+1. Level Context: The reader is at {target_level} level. Translate only words appropriate for this level. Low levels: concrete nouns, basic verbs. High levels: abstract concepts, idioms, literary terms.
+2. Density Context: Replace exactly {calculated_percent}% of unique words.
+3. Formatting: Bold all English words. No naming translation (keep names in original Cyrillic). Preserve HTML (e.g. <p>, <div>, <br>). At the end add: Glossary: word — перевод (one per line, 10-15 words). Return the full text + glossary in one response. No JSON, no code blocks.
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 {level_instruction}"""
 
 # For .txt: plain text, no HTML; glossary at end
-DIGLOT_SYSTEM_PROMPT_TXT = """You are a Diglot Weave teacher for plain text. Rewrite the text replacing exactly {target_percent}% of words with English. Do NOT use HTML, UPPERCASE, or asterisks — integrate English as plain text. Keep names in Russian Cyrillic. At the end add: Glossary: word — перевод (one per line, 10-15 words). Return the full text + glossary in one response. No JSON, no code blocks.
+DIGLOT_SYSTEM_PROMPT_TXT = """You are a Diglot Weave expert.
+1. Level Context: The reader is at {target_level} level. Translate only words appropriate for this level. Low levels: concrete nouns, basic verbs. High levels: abstract concepts, idioms, literary terms.
+2. Density Context: Replace exactly {calculated_percent}% of unique words.
+3. Formatting: Integrate English as plain text (no HTML, no asterisks). No naming translation (keep names in Russian Cyrillic). At the end add: Glossary: word — перевод (one per line, 10-15 words). Return the full text + glossary in one response. No JSON, no code blocks.
 {previous_vocab_instruction}
 {already_glossaried_instruction}
 {level_instruction}"""
@@ -354,25 +360,29 @@ class OpenRouterTranslator:
         level_instruction = ""
         if level_key in LEVEL_INSTRUCTIONS:
             level_instruction = f"\n\nVOCABULARY LEVEL ({level_key}): {LEVEL_INSTRUCTIONS[level_key]}"
+        level_display = level_key or "unspecified"
+        calculated_percent = int(round(target_percent))
 
         if use_uppercase:
             system = DIGLOT_SYSTEM_PROMPT_TXT.format(
-                target_percent=int(round(target_percent)),
+                target_level=level_display,
+                calculated_percent=calculated_percent,
                 previous_vocab_instruction=previous_vocab_instruction,
                 already_glossaried_instruction=already_glossaried_instruction,
                 level_instruction=level_instruction,
             )
-            user = f"Rewrite the following text. Replace exactly {target_words_count} words (~{int(round(target_percent))}%) with English. At the end add Glossary: word — перевод.\n\n" + html
+            user = f"Rewrite the following text. Replace exactly {target_words_count} words (~{calculated_percent}%) with English. At the end add Glossary: word — перевод.\n\n" + html
         else:
             system = DIGLOT_SYSTEM_PROMPT.format(
-                target_percent=int(round(target_percent)),
+                target_level=level_display,
+                calculated_percent=calculated_percent,
                 previous_vocab_instruction=previous_vocab_instruction,
                 already_glossaried_instruction=already_glossaried_instruction,
                 level_instruction=level_instruction,
             )
             if ratio < 0.30:
                 system += "\n\n**Low immersion:** Prefer replacing nouns and objects. Keep sentences natural."
-            user = f"Rewrite the following HTML. Replace exactly {target_words_count} words (~{int(round(target_percent))}%) with English (wrap in <b>). At the end add Glossary: word — перевод.\n\n" + html
+            user = f"Rewrite the following HTML. Replace exactly {target_words_count} words (~{calculated_percent}%) with English (wrap in <b>). At the end add Glossary: word — перевод.\n\n" + html
 
         def _valid_out(out: Optional[str]) -> bool:
             if not out:

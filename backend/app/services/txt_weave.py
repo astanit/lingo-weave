@@ -106,6 +106,7 @@ async def run_weave_txt_async(
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
     model_id: Optional[str] = None,
     target_level: Optional[str] = None,
+    immersion_mode: Optional[str] = None,
 ) -> Tuple[str, str, List[Tuple[str, str, str]]]:
     """Async entry point for TXT weave. Returns (job_id, output_path, anki_entries)."""
     options = options or WeaveOptions()
@@ -139,6 +140,7 @@ async def run_weave_txt_async(
             seg_html, idx, total, translator, options, global_vocab, already_glossaried,
             use_uppercase=True,
             target_level=target_level,
+            immersion_mode=immersion_mode,
         )
         results_plain.append(weaved)
         for front, back, example in get_glossary_entries_with_examples(weaved):
